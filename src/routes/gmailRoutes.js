@@ -13,7 +13,8 @@ import {
   addForwardingMapping,
   getForwardingMappings,
   updateForwardingMappingStatus,
-  deleteForwardingMapping
+  deleteForwardingMapping,
+  getAliasOwner
 } from '../services/gmailForwardingService.js';
 
 const router = express.Router();
@@ -114,8 +115,7 @@ router.post('/rotate', async (req, res) => {
 // Public routes for non-authenticated users
 router.post('/public/create', async (req, res) => {
   try {
-    const userId = req.query.userId || `anon_${uuidv4()}`;
-    const { strategy, domain, version } = req.body;
+    const { userId, strategy, domain, version } = req.body;
     
     // Check if version matches
     if (version !== '1.0.0') {
@@ -125,8 +125,11 @@ router.post('/public/create', async (req, res) => {
       });
     }
     
+    // Use userId from body, fallback to query param, then generate new one
+    const effectiveUserId = userId || req.query.userId || `anon_${uuidv4()}`;
+    
     const alias = await generateGmailAlias(
-      userId, 
+      effectiveUserId, 
       strategy || 'dot', 
       domain || 'gmail.com'
     );
@@ -169,7 +172,18 @@ router.get('/public/aliases/:userId', async (req, res) => {
 router.get('/public/emails/:alias', async (req, res) => {
   try {
     const { alias } = req.params;
-    const userId = req.query.userId || `anon_${uuidv4()}`;
+    let userId = req.query.userId;
+    
+    // If no userId provided, try to find the alias owner
+    if (!userId) {
+      userId = getAliasOwner(alias);
+      if (!userId) {
+        return res.status(404).json({ 
+          error: 'Alias not found or expired',
+          code: 'ALIAS_NOT_FOUND'
+        });
+      }
+    }
     
     const emails = await fetchGmailEmails(userId, alias);
     
