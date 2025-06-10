@@ -175,25 +175,57 @@ export async function addGmailAccount(email, appPassword) {
       const id = existingAccounts.length > 0 ? existingAccounts[0].id : uuidv4();
       
       if (existingAccounts.length > 0) {
-        // Update existing account
-        await connection.query(
-          `UPDATE gmail_accounts SET 
-           app_password = ?,
-           status = 'active',
-           last_used = NOW(),
-           updated_at = NOW()
-           WHERE id = ?`,
-          [encryptedPassword, id]
-        );
+        // Update existing account (only update columns that exist)
+        try {
+          await connection.query(
+            `UPDATE gmail_accounts SET 
+             app_password = ?,
+             last_used = NOW(),
+             updated_at = NOW()
+             WHERE id = ?`,
+            [encryptedPassword, id]
+          );
+        } catch (updateError) {
+          // If updated_at column doesn't exist, try without it
+          if (updateError.code === 'ER_BAD_FIELD_ERROR') {
+            await connection.query(
+              `UPDATE gmail_accounts SET 
+               app_password = ?,
+               last_used = NOW()
+               WHERE id = ?`,
+              [encryptedPassword, id]
+            );
+          } else if (updateError.message.includes('last_used')) {
+            // If last_used column doesn't exist either
+            await connection.query(
+              'UPDATE gmail_accounts SET app_password = ? WHERE id = ?',
+              [encryptedPassword, id]
+            );
+          } else {
+            throw updateError;
+          }
+        }
         console.log(`Updated existing Gmail account: ${email}`);
       } else {
-        // Insert new account
-        await connection.query(
-          `INSERT INTO gmail_accounts (
-            id, email, app_password, quota_used, alias_count, status, last_used
-          ) VALUES (?, ?, ?, 0, 0, 'active', NOW())`,
-          [id, email, encryptedPassword]
-        );
+        // Insert new account (try with minimal columns first)
+        try {
+          await connection.query(
+            'INSERT INTO gmail_accounts (id, email, app_password) VALUES (?, ?, ?)',
+            [id, email, encryptedPassword]
+          );
+        } catch (insertError) {
+          // If that fails, try with additional columns that might exist
+          if (insertError.code === 'ER_BAD_FIELD_ERROR') {
+            await connection.query(
+              `INSERT INTO gmail_accounts (
+                id, email, app_password, quota_used, alias_count, last_used
+              ) VALUES (?, ?, ?, 0, 0, NOW())`,
+              [id, email, encryptedPassword]
+            );
+          } else {
+            throw insertError;
+          }
+        }
         console.log(`Added new Gmail account: ${email}`);
       }
       
@@ -216,13 +248,13 @@ export async function generateGmailAlias(userId, strategy = 'dot', domain = 'gma
   try {
     console.log(`Generating Gmail alias for user ${userId} with strategy ${strategy}`);
     
-    // Get available Gmail accounts
+    // Get available Gmail accounts (without status filter to match existing database)
     const [accounts] = await pool.query(
-      'SELECT * FROM gmail_accounts WHERE status = "active" ORDER BY alias_count ASC, RAND() LIMIT 1'
+      'SELECT * FROM gmail_accounts ORDER BY alias_count ASC, RAND() LIMIT 1'
     );
     
     if (accounts.length === 0) {
-      throw new Error('No active Gmail accounts available');
+      throw new Error('No Gmail accounts available');
     }
     
     const account = accounts[0];
@@ -259,11 +291,40 @@ export async function generateGmailAlias(userId, strategy = 'dot', domain = 'gma
     aliasCache.set(alias, aliasData);
     aliasToAccountMap.set(alias, account.email);
     
-    // Update account statistics
-    await pool.query(
-      'UPDATE gmail_accounts SET alias_count = alias_count + 1, last_used = NOW() WHERE id = ?',
-      [account.id]
-    );
+    // Update account statistics (handle missing columns gracefully)
+    try {
+      await pool.query(
+        'UPDATE gmail_accounts SET alias_count = alias_count + 1, last_used = NOW() WHERE id = ?',
+        [account.id]
+      );
+    } catch (updateError) {
+      if (updateError.code === 'ER_BAD_FIELD_ERROR') {
+        // Try with just one column if the other doesn't exist
+        try {
+          await pool.query(
+            'UPDATE gmail_accounts SET alias_count = alias_count + 1 WHERE id = ?',
+            [account.id]
+          );
+        } catch (aliasError) {
+          if (aliasError.code === 'ER_BAD_FIELD_ERROR') {
+            // If alias_count doesn't exist either, just update last_used
+            try {
+              await pool.query(
+                'UPDATE gmail_accounts SET last_used = NOW() WHERE id = ?',
+                [account.id]
+              );
+            } catch (lastUsedError) {
+              // If neither column exists, just log and continue
+              console.log('Gmail accounts table missing alias_count and last_used columns, skipping stats update');
+            }
+          } else {
+            throw aliasError;
+          }
+        }
+      } else {
+        throw updateError;
+      }
+    }
     
     console.log(`Generated Gmail alias: ${alias} for user ${userId}`);
     return alias;
@@ -454,16 +515,17 @@ export async function cleanupInactiveAliases() {
 // Get Gmail account statistics
 export async function getGmailAccountStats() {
   try {
+    // Get all accounts and let the mapping handle missing columns
     const [accounts] = await pool.query(
-      'SELECT email, alias_count, quota_used, status, last_used FROM gmail_accounts ORDER BY email'
+      'SELECT * FROM gmail_accounts ORDER BY email'
     );
     
     return accounts.map(account => ({
       email: account.email,
-      aliasCount: account.alias_count,
-      quotaUsed: account.quota_used,
-      status: account.status,
-      lastUsed: account.last_used
+      aliasCount: account.alias_count || 0,
+      quotaUsed: account.quota_used || 0,
+      status: account.status || 'unknown',
+      lastUsed: account.last_used || null
     }));
   } catch (error) {
     console.error('Error getting Gmail account stats:', error);
