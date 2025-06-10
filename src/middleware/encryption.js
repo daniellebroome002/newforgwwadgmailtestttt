@@ -24,13 +24,16 @@ class EncryptionService {
 
     try {
       const jsonString = JSON.stringify(data);
+      // Convert to Base64 first (UTF-8 safe)
+      const base64String = Buffer.from(jsonString, 'utf8').toString('base64');
       const keyBytes = Buffer.from(this.keyString, 'utf8');
-      const dataBytes = Buffer.from(jsonString, 'utf8');
       
       let encrypted = '';
-      for (let i = 0; i < dataBytes.length; i++) {
-        const encryptedByte = dataBytes[i] ^ keyBytes[i % keyBytes.length];
-        encrypted += encryptedByte.toString(16).padStart(2, '0');
+      for (let i = 0; i < base64String.length; i++) {
+        const charCode = base64String.charCodeAt(i);
+        const keyCode = keyBytes[i % keyBytes.length];
+        const encryptedChar = charCode ^ keyCode;
+        encrypted += encryptedChar.toString(16).padStart(2, '0');
       }
       
       return { encrypted };
@@ -48,18 +51,19 @@ class EncryptionService {
     try {
       const encrypted = encryptedData.encrypted;
       const keyBytes = Buffer.from(this.keyString, 'utf8');
-      const encryptedBytes = [];
       
+      // Convert hex back to characters
+      let base64String = '';
       for (let i = 0; i < encrypted.length; i += 2) {
-        encryptedBytes.push(parseInt(encrypted.substr(i, 2), 16));
+        const encryptedChar = parseInt(encrypted.substr(i, 2), 16);
+        const keyCode = keyBytes[(i / 2) % keyBytes.length];
+        const originalChar = encryptedChar ^ keyCode;
+        base64String += String.fromCharCode(originalChar);
       }
       
-      let decrypted = '';
-      for (let i = 0; i < encryptedBytes.length; i++) {
-        decrypted += String.fromCharCode(encryptedBytes[i] ^ keyBytes[i % keyBytes.length]);
-      }
-      
-      return JSON.parse(decrypted);
+      // Decode from Base64 back to UTF-8
+      const jsonString = Buffer.from(base64String, 'base64').toString('utf8');
+      return JSON.parse(jsonString);
     } catch (error) {
       console.error('Decryption error:', error);
       return encryptedData;
