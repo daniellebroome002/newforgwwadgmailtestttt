@@ -154,93 +154,11 @@ export function setupWebSocketServer(server) {
   return wss;
 }
 
-// Gmail Account Management (simplified - no IMAP connections)
-export async function addGmailAccount(email, appPassword) {
-  try {
-    console.log(`Adding Gmail account for forwarding: ${email}`);
-    
-    // Encrypt the app password (kept for potential future use)
-    const encryptedPassword = encrypt(appPassword);
-    
-    const connection = await pool.getConnection();
-    try {
-      await connection.beginTransaction();
-      
-      // Check if account already exists
-      const [existingAccounts] = await connection.query(
-        'SELECT * FROM gmail_accounts WHERE email = ?',
-        [email]
-      );
-      
-      const id = existingAccounts.length > 0 ? existingAccounts[0].id : uuidv4();
-      
-      if (existingAccounts.length > 0) {
-        // Update existing account (only update columns that exist)
-        try {
-          await connection.query(
-            `UPDATE gmail_accounts SET 
-             app_password = ?,
-             last_used = NOW(),
-             updated_at = NOW()
-             WHERE id = ?`,
-            [encryptedPassword, id]
-          );
-        } catch (updateError) {
-          // If updated_at column doesn't exist, try without it
-          if (updateError.code === 'ER_BAD_FIELD_ERROR') {
-            await connection.query(
-              `UPDATE gmail_accounts SET 
-               app_password = ?,
-               last_used = NOW()
-               WHERE id = ?`,
-              [encryptedPassword, id]
-            );
-          } else if (updateError.message.includes('last_used')) {
-            // If last_used column doesn't exist either
-            await connection.query(
-              'UPDATE gmail_accounts SET app_password = ? WHERE id = ?',
-              [encryptedPassword, id]
-            );
-          } else {
-            throw updateError;
-          }
-        }
-        console.log(`Updated existing Gmail account: ${email}`);
-      } else {
-        // Insert new account (try with minimal columns first)
-        try {
-          await connection.query(
-            'INSERT INTO gmail_accounts (id, email, app_password) VALUES (?, ?, ?)',
-            [id, email, encryptedPassword]
-          );
-        } catch (insertError) {
-          // If that fails, try with additional columns that might exist
-          if (insertError.code === 'ER_BAD_FIELD_ERROR') {
-            await connection.query(
-              `INSERT INTO gmail_accounts (
-                id, email, app_password, quota_used, alias_count, last_used
-              ) VALUES (?, ?, ?, 0, 0, NOW())`,
-              [id, email, encryptedPassword]
-            );
-          } else {
-            throw insertError;
-          }
-        }
-        console.log(`Added new Gmail account: ${email}`);
-      }
-      
-      await connection.commit();
-      return { success: true, message: 'Gmail account added successfully' };
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
-    }
-  } catch (error) {
-    console.error('Error adding Gmail account:', error);
-    throw new Error(`Failed to add Gmail account: ${error.message}`);
-  }
+// Gmail Forwarding Management (replaces direct account management)
+export async function addGmailForwardingMapping(gmailAccount, tempMailForwarder) {
+  // This function is replaced by addForwardingMapping below
+  // Keeping for backward compatibility but redirecting to new implementation
+  return await addForwardingMapping(gmailAccount, tempMailForwarder);
 }
 
 // Generate Gmail alias using dot notation or plus addressing
@@ -248,26 +166,28 @@ export async function generateGmailAlias(userId, strategy = 'dot', domain = 'gma
   try {
     console.log(`Generating Gmail alias for user ${userId} with strategy ${strategy}`);
     
-    // Get available Gmail accounts (without status filter to match existing database)
-    const [accounts] = await pool.query(
-      'SELECT * FROM gmail_accounts ORDER BY alias_count ASC, RAND() LIMIT 1'
+    // Get active forwarding mappings instead of gmail_accounts
+    const [mappings] = await pool.query(
+      'SELECT * FROM gmail_forwarding_map WHERE status = "active" ORDER BY RAND() LIMIT 1'
     );
     
-    if (accounts.length === 0) {
-      throw new Error('No Gmail accounts available');
+    if (mappings.length === 0) {
+      throw new Error('No active Gmail forwarding mappings available. Please configure Gmail forwarding first.');
     }
     
-    const account = accounts[0];
+    const mapping = mappings[0];
+    const gmailAccount = mapping.gmail_account;
+    
     let alias;
     let attempts = 0;
     const maxAttempts = 10;
     
-    // Generate unique alias
+    // Generate unique alias based on the Gmail account from mapping
     do {
       if (strategy === 'plus') {
-        alias = generatePlusAlias(account.email, domain);
+        alias = generatePlusAlias(gmailAccount, domain);
       } else {
-        alias = generateDotAlias(account.email, domain);
+        alias = generateDotAlias(gmailAccount, domain);
       }
       attempts++;
     } while (aliasCache.has(alias) && attempts < maxAttempts);
@@ -280,8 +200,9 @@ export async function generateGmailAlias(userId, strategy = 'dot', domain = 'gma
     const aliasData = {
       alias,
       userId,
-      parentAccountId: account.id,
-      parentAccountEmail: account.email,
+      parentAccountId: mapping.id,
+      parentAccountEmail: gmailAccount,
+      tempMailForwarder: mapping.temp_mail_forwarder,
       createdAt: Date.now(),
       lastUsed: Date.now(),
       strategy,
@@ -289,44 +210,9 @@ export async function generateGmailAlias(userId, strategy = 'dot', domain = 'gma
     };
     
     aliasCache.set(alias, aliasData);
-    aliasToAccountMap.set(alias, account.email);
+    aliasToAccountMap.set(alias, gmailAccount);
     
-    // Update account statistics (handle missing columns gracefully)
-    try {
-      await pool.query(
-        'UPDATE gmail_accounts SET alias_count = alias_count + 1, last_used = NOW() WHERE id = ?',
-        [account.id]
-      );
-    } catch (updateError) {
-      if (updateError.code === 'ER_BAD_FIELD_ERROR') {
-        // Try with just one column if the other doesn't exist
-        try {
-          await pool.query(
-            'UPDATE gmail_accounts SET alias_count = alias_count + 1 WHERE id = ?',
-            [account.id]
-          );
-        } catch (aliasError) {
-          if (aliasError.code === 'ER_BAD_FIELD_ERROR') {
-            // If alias_count doesn't exist either, just update last_used
-            try {
-              await pool.query(
-                'UPDATE gmail_accounts SET last_used = NOW() WHERE id = ?',
-                [account.id]
-              );
-            } catch (lastUsedError) {
-              // If neither column exists, just log and continue
-              console.log('Gmail accounts table missing alias_count and last_used columns, skipping stats update');
-            }
-          } else {
-            throw aliasError;
-          }
-        }
-      } else {
-        throw updateError;
-      }
-    }
-    
-    console.log(`Generated Gmail alias: ${alias} for user ${userId}`);
+    console.log(`Generated Gmail alias: ${alias} for user ${userId} via forwarding mapping ${mapping.id}`);
     return alias;
   } catch (error) {
     console.error('Error generating Gmail alias:', error);
@@ -512,23 +398,37 @@ export async function cleanupInactiveAliases() {
   }
 }
 
-// Get Gmail account statistics
+// Get Gmail forwarding statistics
 export async function getGmailAccountStats() {
   try {
-    // Get all accounts and let the mapping handle missing columns
-    const [accounts] = await pool.query(
-      'SELECT * FROM gmail_accounts ORDER BY email'
+    // Get all forwarding mappings instead of gmail_accounts
+    const [mappings] = await pool.query(
+      'SELECT * FROM gmail_forwarding_map ORDER BY gmail_account'
     );
     
-    return accounts.map(account => ({
-      email: account.email,
-      aliasCount: account.alias_count || 0,
-      quotaUsed: account.quota_used || 0,
-      status: account.status || 'unknown',
-      lastUsed: account.last_used || null
-    }));
+    // Count active aliases per Gmail account
+    const aliasStats = new Map();
+    for (const [alias, data] of aliasCache.entries()) {
+      const parentEmail = data.parentAccountEmail;
+      aliasStats.set(parentEmail, (aliasStats.get(parentEmail) || 0) + 1);
+    }
+    
+    return {
+      totalAccounts: mappings.length,
+      totalAliases: aliasCache.size,
+      totalUsers: new Set([...aliasCache.values()].map(a => a.userId)).size,
+      accounts: mappings.map(mapping => ({
+        id: mapping.id,
+        email: mapping.gmail_account,
+        tempMailForwarder: mapping.temp_mail_forwarder,
+        aliasCount: aliasStats.get(mapping.gmail_account) || 0,
+        quotaUsed: 0, // Not applicable in forwarding mode
+        status: mapping.status || 'unknown',
+        lastUsed: mapping.created_at
+      }))
+    };
   } catch (error) {
-    console.error('Error getting Gmail account stats:', error);
+    console.error('Error getting Gmail forwarding stats:', error);
     throw error;
   }
 }

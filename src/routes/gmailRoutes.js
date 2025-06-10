@@ -3,7 +3,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { pool } from '../db/init.js';
 import { authenticateToken, requireAdmin, authenticateMasterPassword } from '../middleware/auth.js';
 import { 
-  addGmailAccount, 
   generateGmailAlias, 
   fetchGmailEmails, 
   getUserAliases,
@@ -228,30 +227,91 @@ router.get('/debug/code-version', (req, res) => {
   });
 });
 
-// ==================== Admin Routes ====================
-
-// Add a new Gmail account with IMAP
-router.post('/admin/accounts', authenticateToken, requireAdmin, async (req, res) => {
+// Debug endpoint to check database state
+router.get('/debug/database-state', async (req, res) => {
   try {
-    const { email, appPassword } = req.body;
-    
-    if (!email || !appPassword) {
-      return res.status(400).json({ error: 'Email and app password are required' });
+    // Check admin passphrase
+    const adminAccess = req.headers['admin-access'];
+    if (adminAccess !== process.env.ADMIN_PASSPHRASE) {
+      return res.status(403).json({ error: 'Unauthorized' });
     }
     
-    const result = await addGmailAccount(email, appPassword);
+    // Check gmail_forwarding_map table
+    let forwardingMappings = [];
+    try {
+      const [mappings] = await pool.query('SELECT * FROM gmail_forwarding_map LIMIT 5');
+      forwardingMappings = mappings;
+    } catch (error) {
+      forwardingMappings = { error: error.message };
+    }
+    
+    // Check gmail_accounts table (if it exists)
+    let gmailAccounts = [];
+    try {
+      const [accounts] = await pool.query('SELECT * FROM gmail_accounts LIMIT 5');
+      gmailAccounts = accounts;
+    } catch (error) {
+      gmailAccounts = { error: error.message };
+    }
+    
+    // Check table structure
+    let tableStructure = {};
+    try {
+      const [structure] = await pool.query('DESCRIBE gmail_forwarding_map');
+      tableStructure.gmail_forwarding_map = structure;
+    } catch (error) {
+      tableStructure.gmail_forwarding_map = { error: error.message };
+    }
+    
+    try {
+      const [structure] = await pool.query('DESCRIBE gmail_accounts');
+      tableStructure.gmail_accounts = structure;
+    } catch (error) {
+      tableStructure.gmail_accounts = { error: error.message };
+    }
+    
+    res.json({
+      timestamp: new Date().toISOString(),
+      forwardingMappings,
+      gmailAccounts,
+      tableStructure,
+      cacheStats: {
+        aliasCount: 0,
+        mappingCount: Array.isArray(forwardingMappings) ? forwardingMappings.length : 0
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// ==================== Admin Routes ====================
+
+// Add a new Gmail forwarding mapping (replaces old account system)
+router.post('/admin/accounts', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { gmailAccount, tempMailForwarder } = req.body;
+    
+    if (!gmailAccount || !tempMailForwarder) {
+      return res.status(400).json({ error: 'Gmail account and temp mail forwarder are required' });
+    }
+    
+    const result = await addForwardingMapping(gmailAccount, tempMailForwarder);
     
     res.json(result);
   } catch (error) {
-    console.error('Failed to add Gmail account:', error);
+    console.error('Failed to add Gmail forwarding mapping:', error);
     res.status(400).json({ 
-      error: error.message || 'Failed to add Gmail account',
+      error: error.message || 'Failed to add Gmail forwarding mapping',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Admin route with passphrase for adding Gmail account (alternative auth)
+// Admin route with passphrase for adding Gmail forwarding mapping (alternative auth)
 router.post('/admin/accounts-alt', async (req, res) => {
   try {
     // Check admin passphrase
@@ -260,26 +320,26 @@ router.post('/admin/accounts-alt', async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     
-    const { email, appPassword } = req.body;
+    const { gmailAccount, tempMailForwarder } = req.body;
     
-    if (!email || !appPassword) {
-      return res.status(400).json({ error: 'Email and app password are required' });
+    if (!gmailAccount || !tempMailForwarder) {
+      return res.status(400).json({ error: 'Gmail account and temp mail forwarder are required' });
     }
     
-    const result = await addGmailAccount(email, appPassword);
+    const result = await addForwardingMapping(gmailAccount, tempMailForwarder);
     
     res.json(result);
   } catch (error) {
-    console.error('Failed to add Gmail account:', error);
+    console.error('Failed to add Gmail forwarding mapping:', error);
     res.status(400).json({ 
-      error: error.message || 'Failed to add Gmail account',
+      error: error.message || 'Failed to add Gmail forwarding mapping',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Update Gmail account (update app password)
-router.patch('/admin/accounts/:accountId', async (req, res) => {
+// Update Gmail forwarding mapping (replaces account password update)
+router.patch('/admin/accounts/:mappingId', async (req, res) => {
   try {
     // Check admin passphrase
     const adminAccess = req.headers['admin-access'];
@@ -287,41 +347,57 @@ router.patch('/admin/accounts/:accountId', async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     
-    const { accountId } = req.params;
-    const { appPassword } = req.body;
+    const { mappingId } = req.params;
+    const { gmailAccount, tempMailForwarder } = req.body;
     
-    if (!appPassword) {
-      return res.status(400).json({ error: 'App password is required' });
+    if (!gmailAccount && !tempMailForwarder) {
+      return res.status(400).json({ error: 'Gmail account or temp mail forwarder is required' });
     }
     
-    // Check if account exists
-    const [accounts] = await pool.query(
-      'SELECT id FROM gmail_accounts WHERE id = ?',
-      [accountId]
+    // Check if mapping exists
+    const [mappings] = await pool.query(
+      'SELECT id FROM gmail_forwarding_map WHERE id = ?',
+      [mappingId]
     );
     
-    if (accounts.length === 0) {
-      return res.status(404).json({ error: 'Gmail account not found' });
+    if (mappings.length === 0) {
+      return res.status(404).json({ error: 'Gmail forwarding mapping not found' });
     }
     
-    // Update the app password
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+    
+    if (gmailAccount) {
+      updates.push('gmail_account = ?');
+      values.push(gmailAccount);
+    }
+    
+    if (tempMailForwarder) {
+      updates.push('temp_mail_forwarder = ?');
+      values.push(tempMailForwarder);
+    }
+    
+    values.push(mappingId);
+    
+    // Update the mapping
     await pool.query(
-      'UPDATE gmail_accounts SET app_password = ?, updated_at = NOW() WHERE id = ?',
-      [appPassword, accountId]
+      `UPDATE gmail_forwarding_map SET ${updates.join(', ')} WHERE id = ?`,
+      values
     );
     
-    res.json({ message: 'Gmail account password updated successfully' });
+    res.json({ message: 'Gmail forwarding mapping updated successfully' });
   } catch (error) {
-    console.error('Failed to update Gmail account:', error);
+    console.error('Failed to update Gmail forwarding mapping:', error);
     res.status(400).json({ 
-      error: error.message || 'Failed to update Gmail account',
+      error: error.message || 'Failed to update Gmail forwarding mapping',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Delete a Gmail account
-router.delete('/admin/accounts/:accountId', async (req, res) => {
+// Delete a Gmail forwarding mapping
+router.delete('/admin/accounts/:mappingId', async (req, res) => {
   try {
     // Check admin passphrase
     const adminAccess = req.headers['admin-access'];
@@ -329,36 +405,23 @@ router.delete('/admin/accounts/:accountId', async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     
-    const { accountId } = req.params;
+    const { mappingId } = req.params;
     
-    // Check if account exists
-    const [accounts] = await pool.query(
-      'SELECT id FROM gmail_accounts WHERE id = ?',
-      [accountId]
-    );
+    // Use the existing deleteForwardingMapping function
+    const result = await deleteForwardingMapping(mappingId);
     
-    if (accounts.length === 0) {
-      return res.status(404).json({ error: 'Gmail account not found' });
-    }
-    
-    // Delete the account
-    await pool.query(
-      'DELETE FROM gmail_accounts WHERE id = ?',
-      [accountId]
-    );
-    
-    res.json({ message: 'Gmail account deleted successfully' });
+    res.json(result);
   } catch (error) {
-    console.error('Failed to delete Gmail account:', error);
+    console.error('Failed to delete Gmail forwarding mapping:', error);
     res.status(400).json({ 
-      error: error.message || 'Failed to delete Gmail account',
+      error: error.message || 'Failed to delete Gmail forwarding mapping',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// Toggle Gmail account status
-router.patch('/admin/accounts/:accountId/status', async (req, res) => {
+// Toggle Gmail forwarding mapping status
+router.patch('/admin/accounts/:mappingId/status', async (req, res) => {
   try {
     // Check admin passphrase
     const adminAccess = req.headers['admin-access'];
@@ -366,43 +429,21 @@ router.patch('/admin/accounts/:accountId/status', async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized' });
     }
     
-    const { accountId } = req.params;
+    const { mappingId } = req.params;
     const { status } = req.body;
     
     if (!status) {
       return res.status(400).json({ error: 'Status is required' });
     }
     
-    // Check if account exists
-    const [accounts] = await pool.query(
-      'SELECT id, email, status FROM gmail_accounts WHERE id = ?',
-      [accountId]
-    );
+    // Use the existing updateForwardingMappingStatus function
+    const result = await updateForwardingMappingStatus(mappingId, status);
     
-    if (accounts.length === 0) {
-      return res.status(404).json({ error: 'Gmail account not found' });
-    }
-    
-    const account = accounts[0];
-    
-    // Update account status
-    await pool.query(
-      'UPDATE gmail_accounts SET status = ?, updated_at = NOW() WHERE id = ?',
-      [status, accountId]
-    );
-    
-    // If we're activating an account that was previously inactive, we may need to restart polling
-    if (status === 'active' && account.status !== 'active') {
-      // You may need to call a function from your gmailImapService here
-      // For example: await gmailImapService.restartPolling(account.email);
-      console.log(`Account ${account.email} status changed to active`);
-    }
-    
-    res.json({ message: 'Gmail account status updated successfully', status });
+    res.json(result);
   } catch (error) {
-    console.error('Failed to update Gmail account status:', error);
+    console.error('Failed to update Gmail forwarding mapping status:', error);
     res.status(400).json({ 
-      error: error.message || 'Failed to update Gmail account status',
+      error: error.message || 'Failed to update Gmail forwarding mapping status',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
