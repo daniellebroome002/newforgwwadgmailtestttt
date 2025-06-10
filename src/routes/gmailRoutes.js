@@ -214,6 +214,20 @@ router.get('/public/version', (req, res) => {
   });
 });
 
+// Debug endpoint to check current code version
+router.get('/debug/code-version', (req, res) => {
+  res.json({
+    message: 'Gmail Forwarding Service - Fixed Status Column Issue',
+    version: '2.0.0',
+    timestamp: Date.now(),
+    deployed: new Date().toISOString(),
+    fixes: [
+      'Removed status filter from gmail_accounts queries',
+      'Added flexible column handling for database schema differences'
+    ]
+  });
+});
+
 // ==================== Admin Routes ====================
 
 // Add a new Gmail account with IMAP
