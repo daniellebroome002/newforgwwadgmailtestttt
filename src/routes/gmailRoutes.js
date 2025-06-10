@@ -32,13 +32,14 @@ router.post('/create', async (req, res) => {
     const userId = req.user?.id || `anon_${uuidv4()}`;
     const { strategy, domain } = req.body; // 'dot' or 'plus', 'gmail.com' or 'googlemail.com'
     
-    const result = await generateGmailAlias(
+    const alias = await generateGmailAlias(
       userId, 
       strategy || 'dot', 
       domain || 'gmail.com'
     );
     
-    res.json(result);
+    // Return in the format expected by frontend
+    res.json({ alias });
   } catch (error) {
     console.error('Failed to create Gmail alias:', error);
     res.status(400).json({ 
@@ -91,13 +92,14 @@ router.post('/rotate', async (req, res) => {
     const userId = req.user?.id || req.body.userId || `anon_${uuidv4()}`;
     const { strategy, domain } = req.body;
     
-    const result = await rotateUserAlias(
+    const alias = await rotateUserAlias(
       userId, 
       strategy || 'dot', 
       domain || 'gmail.com'
     );
     
-    res.json(result);
+    // Return in the format expected by frontend
+    res.json({ alias });
   } catch (error) {
     console.error('Failed to rotate Gmail alias:', error);
     res.status(400).json({ 
@@ -123,13 +125,14 @@ router.post('/public/create', async (req, res) => {
       });
     }
     
-    const result = await generateGmailAlias(
+    const alias = await generateGmailAlias(
       userId, 
       strategy || 'dot', 
       domain || 'gmail.com'
     );
     
-    res.json(result);
+    // Return in the format expected by frontend
+    res.json({ alias });
   } catch (error) {
     console.error('Failed to create Gmail alias:', error);
     res.status(400).json({ 
@@ -188,13 +191,14 @@ router.post('/public/rotate', async (req, res) => {
       return res.status(400).json({ error: 'User ID is required' });
     }
     
-    const result = await rotateUserAlias(
+    const alias = await rotateUserAlias(
       userId, 
       strategy || 'dot', 
       domain || 'gmail.com'
     );
     
-    res.json(result);
+    // Return in the format expected by frontend
+    res.json({ alias });
   } catch (error) {
     console.error('Failed to rotate Gmail alias:', error);
     res.status(400).json({ 
