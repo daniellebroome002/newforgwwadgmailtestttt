@@ -10,7 +10,6 @@ import {
   findRegisteredUserByEmail, 
   cacheReceivedEmail
 } from '../guestSessionHandler.js';
-import { storeReceivedEmail as storeGmailEmail, parseForwardedEmail } from '../services/gmailForwardingService.js';
 
 // Email parsing helper functions
 function extractSenderEmail(emailFrom) {
@@ -297,42 +296,6 @@ router.post('/email/incoming', express.urlencoded({ extended: true }), async (re
         success: true, 
         message: 'Email stored in database',
         emailId: emailData.id
-      });
-    }
-    
-    // LAST: Check if it's a Gmail forwarded email (Gmail aliases)
-    const forwardedEmailInfo = parseForwardedEmail(cleanRecipient, {
-      headers: parsedEmail.headers,
-      subject: parsedEmail.subject,
-      bodyText: parsedEmail.text,
-      bodyHtml: parsedEmail.html
-    });
-    
-    if (forwardedEmailInfo) {
-      console.log(`Processing Gmail forwarded email from ${forwardedEmailInfo.gmailAccount}`);
-      
-      // If we found the original recipient, try to store it for that alias
-      if (forwardedEmailInfo.originalRecipient) {
-        const gmailStored = storeGmailEmail(forwardedEmailInfo.originalRecipient, emailData);
-        if (gmailStored) {
-          console.log(`Received email for Gmail alias: ${forwardedEmailInfo.originalRecipient} (forwarded via ${cleanRecipient})`);
-          return res.status(200).json({ 
-            success: true, 
-            message: 'Email stored in Gmail forwarding cache',
-            emailId: emailData.id,
-            originalRecipient: forwardedEmailInfo.originalRecipient,
-            forwarder: cleanRecipient
-          });
-        }
-      }
-      
-      // If no original recipient found, log for debugging
-      console.log(`Gmail forwarded email received but original recipient not found. Forwarder: ${cleanRecipient}`);
-      return res.status(200).json({ 
-        success: true, 
-        message: 'Gmail forwarded email received but original recipient not identified',
-        emailId: emailData.id,
-        forwarder: cleanRecipient
       });
     }
     

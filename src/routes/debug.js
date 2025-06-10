@@ -1,10 +1,14 @@
 import express from 'express';
 import { authenticateMasterPassword } from '../middleware/auth.js';
 import { 
-  getGmailAccountStats,
-  getEmailCacheStats,
-  getForwardingMappings
-} from '../services/gmailForwardingService.js';
+  generateGmailDebugReport, 
+  dumpGmailServiceStatus,
+  checkAccountHealth,
+  checkUserAliases,
+  findAccountAliases,
+  recoverFailedAccount,
+  reassignAlias
+} from '../utils/gmailServiceDebug.js';
 
 const router = express.Router();
 
@@ -17,25 +21,10 @@ router.use((req, res, next) => {
   next();
 });
 
-// Get Gmail forwarding service debug report
-router.get('/gmail', async (req, res) => {
+// Get full Gmail service debug report
+router.get('/gmail', (req, res) => {
   try {
-    const accountStats = await getGmailAccountStats();
-    const cacheStats = getEmailCacheStats();
-    const mappings = await getForwardingMappings();
-    
-    const report = {
-      timestamp: new Date().toISOString(),
-      service: 'Gmail Forwarding (No IMAP)',
-      accounts: accountStats,
-      cache: cacheStats,
-      forwardingMappings: {
-        count: mappings.length,
-        active: mappings.filter(m => m.status === 'active').length,
-        mappings: mappings
-      }
-    };
-    
+    const report = generateGmailDebugReport();
     res.json({ report });
   } catch (error) {
     console.error('Failed to generate Gmail debug report:', error);
@@ -43,62 +32,82 @@ router.get('/gmail', async (req, res) => {
   }
 });
 
-// Dump Gmail forwarding service status to console
-router.post('/gmail/dump', async (req, res) => {
+// Dump Gmail service status to console
+router.post('/gmail/dump', (req, res) => {
   try {
-    const accountStats = await getGmailAccountStats();
-    const cacheStats = getEmailCacheStats();
-    const mappings = await getForwardingMappings();
-    
-    console.log('======= GMAIL FORWARDING SERVICE DEBUG =======');
-    console.log(`Generated at: ${new Date().toISOString()}`);
-    console.log(`Service Type: Gmail Forwarding (No IMAP)`);
-    console.log('\n--- ACCOUNTS ---');
-    console.log(`Total Gmail accounts: ${accountStats.length}`);
-    console.table(accountStats);
-    
-    console.log('\n--- FORWARDING MAPPINGS ---');
-    console.log(`Total mappings: ${mappings.length}`);
-    console.log(`Active mappings: ${mappings.filter(m => m.status === 'active').length}`);
-    console.table(mappings.map(m => ({
-      gmail: m.gmail_account,
-      forwarder: m.temp_mail_forwarder,
-      status: m.status,
-      created: new Date(m.created_at).toLocaleDateString()
-    })));
-    
-    console.log('\n--- CACHE STATS ---');
-    console.log(`Total aliases: ${cacheStats.totalAliases}`);
-    console.log(`Cached emails: ${cacheStats.totalCachedEmails}`);
-    console.log(`Connected clients: ${cacheStats.connectedClients}`);
-    console.log(`Active connections: ${cacheStats.activeConnections}`);
-    console.log('===============================================');
-    
-    res.json({ message: 'Gmail forwarding service status dumped to console' });
+    dumpGmailServiceStatus();
+    res.json({ message: 'Gmail service status dumped to console' });
   } catch (error) {
     console.error('Failed to dump Gmail service status:', error);
     res.status(500).json({ error: 'Failed to dump status' });
   }
 });
 
-// Get forwarding mapping for specific Gmail account
-router.get('/gmail/account/:email/mapping', async (req, res) => {
+// Check health of specific account
+router.get('/gmail/account/:email', (req, res) => {
   try {
     const { email } = req.params;
-    const mappings = await getForwardingMappings();
-    const mapping = mappings.find(m => m.gmail_account === email);
+    const health = checkAccountHealth(email);
+    res.json({ health });
+  } catch (error) {
+    console.error('Failed to check account health:', error);
+    res.status(500).json({ error: 'Failed to check account health' });
+  }
+});
+
+// Check aliases for specific user
+router.get('/gmail/user/:userId/aliases', (req, res) => {
+  try {
+    const { userId } = req.params;
+    const aliases = checkUserAliases(userId);
+    res.json({ aliases });
+  } catch (error) {
+    console.error('Failed to check user aliases:', error);
+    res.status(500).json({ error: 'Failed to check user aliases' });
+  }
+});
+
+// Find all aliases for an account
+router.get('/gmail/account/:email/aliases', (req, res) => {
+  try {
+    const { email } = req.params;
+    const aliases = findAccountAliases(email);
+    res.json({ aliases });
+  } catch (error) {
+    console.error('Failed to find account aliases:', error);
+    res.status(500).json({ error: 'Failed to find account aliases' });
+  }
+});
+
+// Recover a failed account
+router.post('/gmail/account/:email/recover', (req, res) => {
+  try {
+    const { email } = req.params;
+    const result = recoverFailedAccount(email);
+    res.json({ result });
+  } catch (error) {
+    console.error('Failed to recover account:', error);
+    res.status(500).json({ error: 'Failed to recover account' });
+  }
+});
+
+// Reassign an alias to a different account
+router.post('/gmail/alias/reassign', (req, res) => {
+  try {
+    const { aliasEmail, targetAccountEmail } = req.body;
     
-    if (!mapping) {
-      return res.status(404).json({ 
-        error: 'No forwarding mapping found for this Gmail account',
-        email 
+    if (!aliasEmail || !targetAccountEmail) {
+      return res.status(400).json({ 
+        error: 'Missing required parameters', 
+        message: 'Both aliasEmail and targetAccountEmail are required' 
       });
     }
     
-    res.json({ mapping });
+    const result = reassignAlias(aliasEmail, targetAccountEmail);
+    res.json({ result });
   } catch (error) {
-    console.error('Failed to get forwarding mapping:', error);
-    res.status(500).json({ error: 'Failed to get forwarding mapping' });
+    console.error('Failed to reassign alias:', error);
+    res.status(500).json({ error: 'Failed to reassign alias' });
   }
 });
 
