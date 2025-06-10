@@ -23,15 +23,17 @@ class EncryptionService {
     }
 
     try {
+      // Use Buffer methods throughout to preserve UTF-8
       const jsonString = JSON.stringify(data);
-      // Convert to Base64 first (UTF-8 safe)
-      const base64String = Buffer.from(jsonString, 'utf8').toString('base64');
-      const keyBytes = Buffer.from(this.keyString, 'utf8');
+      const jsonBuffer = Buffer.from(jsonString, 'utf8');
+      const base64String = jsonBuffer.toString('base64');
+      const keyBuffer = Buffer.from(this.keyString, 'utf8');
       
+      // XOR the base64 string (which is ASCII safe)
       let encrypted = '';
       for (let i = 0; i < base64String.length; i++) {
         const charCode = base64String.charCodeAt(i);
-        const keyCode = keyBytes[i % keyBytes.length];
+        const keyCode = keyBuffer[i % keyBuffer.length];
         const encryptedChar = charCode ^ keyCode;
         encrypted += encryptedChar.toString(16).padStart(2, '0');
       }
@@ -50,19 +52,20 @@ class EncryptionService {
 
     try {
       const encrypted = encryptedData.encrypted;
-      const keyBytes = Buffer.from(this.keyString, 'utf8');
+      const keyBuffer = Buffer.from(this.keyString, 'utf8');
       
-      // Convert hex back to characters
+      // Convert hex back to base64 string
       let base64String = '';
       for (let i = 0; i < encrypted.length; i += 2) {
         const encryptedChar = parseInt(encrypted.substr(i, 2), 16);
-        const keyCode = keyBytes[(i / 2) % keyBytes.length];
+        const keyCode = keyBuffer[(i / 2) % keyBuffer.length];
         const originalChar = encryptedChar ^ keyCode;
         base64String += String.fromCharCode(originalChar);
       }
       
-      // Decode from Base64 back to UTF-8
-      const jsonString = Buffer.from(base64String, 'base64').toString('utf8');
+      // Decode from Base64 back to UTF-8 using Buffer
+      const jsonBuffer = Buffer.from(base64String, 'base64');
+      const jsonString = jsonBuffer.toString('utf8');
       return JSON.parse(jsonString);
     } catch (error) {
       console.error('Decryption error:', error);
