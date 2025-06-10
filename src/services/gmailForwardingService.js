@@ -470,6 +470,16 @@ function isAliasActive(alias) {
   return (now - aliasData.lastUsed) <= ALIAS_TTL;
 }
 
+// Find the owner of an alias
+export function getAliasOwner(alias) {
+  if (!aliasCache.has(alias)) {
+    return null;
+  }
+  
+  const aliasData = aliasCache.get(alias);
+  return aliasData.userId;
+}
+
 // Load Gmail forwarding mappings from database
 async function loadForwardingMappings() {
   try {
