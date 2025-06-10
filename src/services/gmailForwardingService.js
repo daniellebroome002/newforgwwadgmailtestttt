@@ -166,13 +166,28 @@ export async function generateGmailAlias(userId, strategy = 'dot', domain = 'gma
   try {
     console.log(`Generating Gmail alias for user ${userId} with strategy ${strategy}`);
     
-    // Get active forwarding mappings instead of gmail_accounts
-    const [mappings] = await pool.query(
-      'SELECT * FROM gmail_forwarding_map WHERE status = "active" ORDER BY RAND() LIMIT 1'
-    );
+    // Get active forwarding mappings - handle missing status column gracefully
+    let mappings = [];
+    try {
+      const [result] = await pool.query(
+        'SELECT * FROM gmail_forwarding_map WHERE status = "active" ORDER BY RAND() LIMIT 1'
+      );
+      mappings = result;
+    } catch (statusError) {
+      if (statusError.code === 'ER_BAD_FIELD_ERROR') {
+        // Status column doesn't exist, get all mappings
+        console.log('Status column not found, querying all mappings');
+        const [result] = await pool.query(
+          'SELECT * FROM gmail_forwarding_map ORDER BY RAND() LIMIT 1'
+        );
+        mappings = result;
+      } else {
+        throw statusError;
+      }
+    }
     
     if (mappings.length === 0) {
-      throw new Error('No active Gmail forwarding mappings available. Please configure Gmail forwarding first.');
+      throw new Error('No Gmail forwarding mappings available. Please add at least one Gmail forwarding mapping in the admin panel first.');
     }
     
     const mapping = mappings[0];
@@ -423,7 +438,7 @@ export async function getGmailAccountStats() {
         tempMailForwarder: mapping.temp_mail_forwarder,
         aliasCount: aliasStats.get(mapping.gmail_account) || 0,
         quotaUsed: 0, // Not applicable in forwarding mode
-        status: mapping.status || 'unknown',
+        status: mapping.status || 'active', // Default to active if status column missing
         lastUsed: mapping.created_at
       }))
     };
@@ -485,20 +500,32 @@ async function loadForwardingMappings() {
 // Add Gmail forwarding mapping
 export async function addForwardingMapping(gmailAccount, tempMailForwarder) {
   try {
+    console.log(`Adding Gmail forwarding mapping: ${gmailAccount} -> ${tempMailForwarder}`);
+    
     const id = uuidv4();
     
-    // Try to insert without status column first (in case the column doesn't exist)
+    // Check if mapping already exists
+    const [existing] = await pool.query(
+      'SELECT * FROM gmail_forwarding_map WHERE gmail_account = ? OR temp_mail_forwarder = ?',
+      [gmailAccount, tempMailForwarder]
+    );
+    
+    if (existing.length > 0) {
+      throw new Error('A mapping with this Gmail account or temp mail forwarder already exists');
+    }
+    
+    // Try inserting with status column first, fallback without it
     try {
       await pool.query(
-        'INSERT INTO gmail_forwarding_map (id, gmail_account, temp_mail_forwarder) VALUES (?, ?, ?)',
-        [id, gmailAccount, tempMailForwarder]
+        'INSERT INTO gmail_forwarding_map (id, gmail_account, temp_mail_forwarder, status) VALUES (?, ?, ?, ?)',
+        [id, gmailAccount, tempMailForwarder, 'active']
       );
     } catch (insertError) {
-      // If that fails, try with status column
       if (insertError.code === 'ER_BAD_FIELD_ERROR') {
-        console.log('Trying insert with status column...');
+        // Status column doesn't exist, insert without it
+        console.log('Status column not found, inserting without status');
         await pool.query(
-          'INSERT INTO gmail_forwarding_map (id, gmail_account, temp_mail_forwarder, status) VALUES (?, ?, ?, "active")',
+          'INSERT INTO gmail_forwarding_map (id, gmail_account, temp_mail_forwarder) VALUES (?, ?, ?)',
           [id, gmailAccount, tempMailForwarder]
         );
       } else {
@@ -506,14 +533,18 @@ export async function addForwardingMapping(gmailAccount, tempMailForwarder) {
       }
     }
     
-    // Update in-memory cache
-    forwardingMap.set(tempMailForwarder, gmailAccount);
+    // Refresh the forwarding mappings in memory
+    await loadForwardingMappings();
     
-    console.log(`Added forwarding mapping: ${gmailAccount} → ${tempMailForwarder}`);
-    return { success: true, id };
+    console.log(`Added Gmail forwarding mapping successfully: ${id}`);
+    return { 
+      success: true, 
+      message: 'Gmail forwarding mapping added successfully',
+      id: id
+    };
   } catch (error) {
-    console.error('Error adding forwarding mapping:', error);
-    throw error;
+    console.error('Error adding Gmail forwarding mapping:', error);
+    throw new Error(`Failed to add Gmail forwarding mapping: ${error.message}`);
   }
 }
 
@@ -533,31 +564,49 @@ export async function getForwardingMappings() {
 // Update forwarding mapping status
 export async function updateForwardingMappingStatus(id, status) {
   try {
-    // Check if status column exists first
+    console.log(`Updating forwarding mapping ${id} status to: ${status}`);
+    
+    // Check if mapping exists
+    const [mappings] = await pool.query(
+      'SELECT * FROM gmail_forwarding_map WHERE id = ?',
+      [id]
+    );
+    
+    if (mappings.length === 0) {
+      throw new Error('Gmail forwarding mapping not found');
+    }
+    
+    // Try to update status column, handle gracefully if it doesn't exist
     try {
-      const [result] = await pool.query(
+      await pool.query(
         'UPDATE gmail_forwarding_map SET status = ? WHERE id = ?',
         [status, id]
       );
-      
-      if (result.affectedRows > 0) {
-        // Reload mappings to update cache
-        await loadForwardingMappings();
-        return { success: true };
-      }
-      
-      return { success: false, message: 'Mapping not found' };
+      console.log(`Updated forwarding mapping status successfully`);
     } catch (updateError) {
       if (updateError.code === 'ER_BAD_FIELD_ERROR') {
-        console.log('Status column does not exist, status update skipped');
-        return { success: true, message: 'Status column not available' };
+        // Status column doesn't exist, just log and continue
+        console.log('Status column not found, skipping status update');
+        return { 
+          success: true, 
+          message: 'Gmail forwarding mapping exists but status column not available',
+          note: 'Consider adding status column to gmail_forwarding_map table'
+        };
       } else {
         throw updateError;
       }
     }
+    
+    // Refresh the forwarding mappings in memory
+    await loadForwardingMappings();
+    
+    return { 
+      success: true, 
+      message: 'Gmail forwarding mapping status updated successfully' 
+    };
   } catch (error) {
     console.error('Error updating forwarding mapping status:', error);
-    throw error;
+    throw new Error(`Failed to update Gmail forwarding mapping status: ${error.message}`);
   }
 }
 
