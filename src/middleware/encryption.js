@@ -23,19 +23,14 @@ class EncryptionService {
     }
 
     try {
-      // Use Buffer methods throughout to preserve UTF-8
       const jsonString = JSON.stringify(data);
-      const jsonBuffer = Buffer.from(jsonString, 'utf8');
-      const base64String = jsonBuffer.toString('base64');
-      const keyBuffer = Buffer.from(this.keyString, 'utf8');
+      const keyBytes = Buffer.from(this.keyString, 'utf8');
+      const dataBytes = Buffer.from(jsonString, 'utf8');
       
-      // XOR the base64 string (which is ASCII safe)
       let encrypted = '';
-      for (let i = 0; i < base64String.length; i++) {
-        const charCode = base64String.charCodeAt(i);
-        const keyCode = keyBuffer[i % keyBuffer.length];
-        const encryptedChar = charCode ^ keyCode;
-        encrypted += encryptedChar.toString(16).padStart(2, '0');
+      for (let i = 0; i < dataBytes.length; i++) {
+        const encryptedByte = dataBytes[i] ^ keyBytes[i % keyBytes.length];
+        encrypted += encryptedByte.toString(16).padStart(2, '0');
       }
       
       return { encrypted };
@@ -52,21 +47,19 @@ class EncryptionService {
 
     try {
       const encrypted = encryptedData.encrypted;
-      const keyBuffer = Buffer.from(this.keyString, 'utf8');
+      const keyBytes = Buffer.from(this.keyString, 'utf8');
+      const encryptedBytes = [];
       
-      // Convert hex back to base64 string
-      let base64String = '';
       for (let i = 0; i < encrypted.length; i += 2) {
-        const encryptedChar = parseInt(encrypted.substr(i, 2), 16);
-        const keyCode = keyBuffer[(i / 2) % keyBuffer.length];
-        const originalChar = encryptedChar ^ keyCode;
-        base64String += String.fromCharCode(originalChar);
+        encryptedBytes.push(parseInt(encrypted.substr(i, 2), 16));
       }
       
-      // Decode from Base64 back to UTF-8 using Buffer
-      const jsonBuffer = Buffer.from(base64String, 'base64');
-      const jsonString = jsonBuffer.toString('utf8');
-      return JSON.parse(jsonString);
+      let decrypted = '';
+      for (let i = 0; i < encryptedBytes.length; i++) {
+        decrypted += String.fromCharCode(encryptedBytes[i] ^ keyBytes[i % keyBytes.length]);
+      }
+      
+      return JSON.parse(decrypted);
     } catch (error) {
       console.error('Decryption error:', error);
       return encryptedData;
@@ -87,7 +80,11 @@ export const encryptResponse = (req, res, next) => {
   
   res.json = function(data) {
     // Skip encryption for certain routes or conditions
-    if (req.path.includes('/admin/') || req.path.includes('/health')) {
+    if (req.path.includes('/admin/') || 
+        req.path.includes('/health') ||
+        req.path.includes('/received') ||  // Skip received emails
+        req.path.includes('/gmail/') ||   // Skip Gmail content
+        (req.path.includes('/emails/') && req.path.includes('/emails/public/') && req.method === 'GET' && req.path.split('/').length > 4)) {  // Skip individual email content
       return originalJson.call(this, data);
     }
     
