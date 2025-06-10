@@ -82,9 +82,15 @@ export const encryptResponse = (req, res, next) => {
     // Skip encryption for certain routes or conditions
     if (req.path.includes('/admin/') || 
         req.path.includes('/health') ||
-        req.path.includes('/received') ||  // Skip received emails
-        req.path.includes('/gmail/') ||   // Skip Gmail content
-        (req.path.includes('/emails/') && req.path.includes('/emails/public/') && req.method === 'GET' && req.path.split('/').length > 4)) {  // Skip individual email content
+        req.path.includes('/received') ||     // Skip received emails
+        req.path.includes('/gmail/') ||      // Skip Gmail content  
+        req.path.includes('/webhook/') ||    // Skip webhook content (incoming emails)
+        req.path.includes('/guest/emails/') ||  // Skip guest email content
+        req.path.includes('/guest/receive-email/') ||  // Skip guest receive email
+        req.path.includes('/messages/') ||   // Skip custom messages
+        req.path.includes('/emails/public/') ||  // Skip ALL public email routes (includes individual emails)
+        req.path.includes('/debug/') ||      // Skip debug routes
+        (req.path.includes('/emails/') && req.method === 'GET' && req.path.split('/').length > 4)) {  // Skip individual email content
       return originalJson.call(this, data);
     }
     
