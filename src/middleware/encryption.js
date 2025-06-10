@@ -71,6 +71,11 @@ const encryptionService = new EncryptionService();
 
 // Middleware to encrypt responses
 export const encryptResponse = (req, res, next) => {
+  // Skip encryption for OPTIONS requests (CORS preflight)
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  
   const originalJson = res.json;
   
   res.json = function(data) {
