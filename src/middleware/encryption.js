@@ -69,33 +69,88 @@ class EncryptionService {
 
 const encryptionService = new EncryptionService();
 
+// List of routes that should be encrypted (14 core scraping targets)
+const ROUTES_TO_ENCRYPT = [
+  // Domain discovery
+  '/domains/public',
+  
+  // Public email creation (no auth)
+  '/emails/public/create',
+  '/emails/public/', // covers /emails/public/:email
+  
+  // Guest email system
+  '/guest/init',
+  '/guest/emails/create',
+  '/guest/emails/', // covers both /guest/emails and /guest/emails/:id
+  
+  // Authenticated email system  
+  '/emails/create',
+  '/emails/:id',
+  '/emails/', // when used as GET /emails/
+  
+  // Gmail alternative system
+  '/gmail/public/create',
+  '/gmail/public/aliases',
+  '/gmail/public/rotate',
+  '/gmail/public/version',
+  '/gmail/', // covers /gmail/:alias/emails
+];
+
+// Function to check if a route should be encrypted
+const shouldEncryptRoute = (req) => {
+  const path = req.path;
+  const method = req.method;
+  
+  // Skip OPTIONS requests (CORS preflight)
+  if (method === 'OPTIONS') {
+    return false;
+  }
+  
+  // Skip admin, monitoring, auth, and webhook routes
+  if (path.includes('/admin/') || 
+      path.includes('/health') || 
+      path.includes('/monitor/') ||
+      path.includes('/auth/') ||
+      path.includes('/webhooks/') ||
+      path.includes('/debug/')) {
+    return false;
+  }
+  
+  // Skip email content routes (international character issues)
+  if (path.includes('/received')) {
+    return false;
+  }
+  
+  // Check if route matches our encryption targets
+  return ROUTES_TO_ENCRYPT.some(route => {
+    if (route.endsWith('/')) {
+      // For routes ending with /, check if path starts with the route
+      return path.startsWith(route);
+    } else {
+      // For exact routes, check exact match or with ID parameter
+      return path === route || path.startsWith(route + '/');
+    }
+  });
+};
+
 // Middleware to encrypt responses
 export const encryptResponse = (req, res, next) => {
-  // Skip encryption for OPTIONS requests (CORS preflight)
-  if (req.method === 'OPTIONS') {
+  // Check if this route should be encrypted
+  if (!shouldEncryptRoute(req)) {
     return next();
   }
   
   const originalJson = res.json;
   
   res.json = function(data) {
-    // Skip encryption for certain routes or conditions
-    if (req.path.includes('/admin/') || 
-        req.path.includes('/health') ||
-        req.path.includes('/received') ||     // Skip received emails
-        req.path.includes('/gmail/') ||      // Skip Gmail content  
-        req.path.includes('/webhook/') ||    // Skip webhook content (incoming emails)
-        req.path.includes('/guest/emails/') ||  // Skip guest email content
-        req.path.includes('/guest/receive-email/') ||  // Skip guest receive email
-        req.path.includes('/messages/') ||   // Skip custom messages
-        req.path.includes('/emails/public/') ||  // Skip ALL public email routes (includes individual emails)
-        req.path.includes('/debug/') ||      // Skip debug routes
-        (req.path.includes('/emails/') && req.method === 'GET' && req.path.split('/').length > 4)) {  // Skip individual email content
+    try {
+      const encryptedData = encryptionService.encrypt(data);
+      return originalJson.call(this, encryptedData);
+    } catch (error) {
+      console.error('Encryption error:', error);
+      // Fallback to unencrypted response
       return originalJson.call(this, data);
     }
-    
-    const encryptedData = encryptionService.encrypt(data);
-    return originalJson.call(this, encryptedData);
   };
   
   next();
