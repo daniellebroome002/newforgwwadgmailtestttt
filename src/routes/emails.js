@@ -378,11 +378,23 @@ router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRe
         return res.status(400).json({ error: 'Invalid domain or domain not verified' });
       }
       
-      // Insert temp email - we already performed a smart check for uniqueness
-      await connection.query(
-        'INSERT INTO temp_emails (id, user_id, email, domain_id, expires_at) VALUES (?, ?, ?, ?, ?)',
-        [id, req.user.id, email, domainId, mysqlExpiresAt]
-      );
+      // Determine if this is a regular domain or custom domain
+      const isCustomDomain = customDomains.length > 0;
+      
+      // Insert temp email with proper domain handling
+      if (isCustomDomain) {
+        // For custom domains: set domain_id to NULL, use custom_domain_id
+        await connection.query(
+          'INSERT INTO temp_emails (id, user_id, email, domain_id, custom_domain_id, expires_at) VALUES (?, ?, ?, NULL, ?, ?)',
+          [id, req.user.id, email, domainId, mysqlExpiresAt]
+        );
+      } else {
+        // For regular domains: use domain_id, set custom_domain_id to NULL
+        await connection.query(
+          'INSERT INTO temp_emails (id, user_id, email, domain_id, custom_domain_id, expires_at) VALUES (?, ?, ?, ?, NULL, ?)',
+          [id, req.user.id, email, domainId, mysqlExpiresAt]
+        );
+      }
       
       // Store IP history
       await connection.query(
@@ -717,9 +729,9 @@ router.post('/public/create', rateLimitMiddleware, checkCaptchaRequired, verifyC
     await connection.beginTransaction();
 
     try {
-      // Insert temp email
+      // Insert temp email (public endpoint only uses regular domains)
       await connection.query(
-        'INSERT INTO temp_emails (id, email, domain_id, expires_at) VALUES (?, ?, ?, ?)',
+        'INSERT INTO temp_emails (id, email, domain_id, custom_domain_id, expires_at) VALUES (?, ?, ?, NULL, ?)',
         [id, email, domainId, expiresAt]
       );
 
