@@ -3,8 +3,45 @@ import { v4 as uuidv4 } from 'uuid';
 import { authenticateToken, requireAdmin } from '../middleware/auth.js';
 import { pool } from '../db/init.js';
 import dns from 'dns';
+import axios from 'axios';
 
 const router = express.Router();
+
+// Mailserver push functions
+const pushDomainToMailserver = async (domain, action) => {
+  try {
+    const mailserverUrl = process.env.MAILSERVER_URL;
+    const mailserverToken = process.env.MAILSERVER_TOKEN;
+    
+    if (!mailserverUrl || !mailserverToken) {
+      console.warn('Mailserver URL or token not configured, skipping push');
+      return { success: false, error: 'Mailserver not configured' };
+    }
+
+    const endpoint = action === 'add' ? '/domain/add' : '/domain/delete';
+    const response = await axios.post(`${mailserverUrl}${endpoint}`, 
+      { domain },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${mailserverToken}`
+        },
+        timeout: 10000 // 10 second timeout
+      }
+    );
+
+    console.log(`✅ Domain ${domain} ${action} pushed to mailserver successfully`);
+    return { success: true, result: response.data };
+  } catch (error) {
+    if (error.response) {
+      console.error(`❌ Failed to push domain ${domain} ${action} to mailserver:`, error.response.data);
+      return { success: false, error: error.response.data };
+    } else {
+      console.error(`❌ Error pushing domain ${domain} ${action} to mailserver:`, error.message);
+      return { success: false, error: error.message };
+    }
+  }
+};
 
 // DNS verification function with timeout
 const verifyDomainDNS = (domain) => {
@@ -163,6 +200,12 @@ router.post('/custom/:id/verify', authenticateToken, async (req, res) => {
         ['verified', domainId]
       );
 
+      // Push verified domain to mailserver
+      const pushResult = await pushDomainToMailserver(domain.domain, 'add');
+      if (!pushResult.success) {
+        console.warn(`Domain verified but failed to push to mailserver: ${pushResult.error}`);
+      }
+
       res.json({ 
         success: true, 
         message: 'Domain verified successfully!' 
@@ -189,6 +232,19 @@ router.delete('/custom/:id', authenticateToken, async (req, res) => {
   try {
     const domainId = req.params.id;
     
+    // Get domain info before deletion
+    const [domains] = await pool.query(
+      'SELECT * FROM custom_domains WHERE id = ? AND user_id = ?',
+      [domainId, req.user.id]
+    );
+
+    if (domains.length === 0) {
+      return res.status(404).json({ error: 'Domain not found' });
+    }
+
+    const domain = domains[0];
+    
+    // Delete from database
     const [result] = await pool.query(
       'DELETE FROM custom_domains WHERE id = ? AND user_id = ?',
       [domainId, req.user.id]
@@ -196,6 +252,14 @@ router.delete('/custom/:id', authenticateToken, async (req, res) => {
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: 'Domain not found' });
+    }
+
+    // Push domain deletion to mailserver (only if it was verified)
+    if (domain.status === 'verified') {
+      const pushResult = await pushDomainToMailserver(domain.domain, 'delete');
+      if (!pushResult.success) {
+        console.warn(`Domain deleted from DB but failed to remove from mailserver: ${pushResult.error}`);
+      }
     }
 
     res.json({ success: true, message: 'Domain deleted successfully' });
