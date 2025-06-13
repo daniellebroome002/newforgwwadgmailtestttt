@@ -363,14 +363,19 @@ router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRe
       // Create email ID
       const id = uuidv4();
       
-      // Verify the domain exists
-      const [domains] = await connection.query(
+      // Verify the domain exists (check both regular domains and custom domains)
+      const [regularDomains] = await connection.query(
         'SELECT * FROM domains WHERE id = ?',
         [domainId]
       );
       
-      if (domains.length === 0) {
-        return res.status(400).json({ error: 'Invalid domain' });
+      const [customDomains] = await connection.query(
+        'SELECT * FROM custom_domains WHERE id = ? AND user_id = ? AND status = ?',
+        [domainId, req.user.id, 'verified']
+      );
+      
+      if (regularDomains.length === 0 && customDomains.length === 0) {
+        return res.status(400).json({ error: 'Invalid domain or domain not verified' });
       }
       
       // Insert temp email - we already performed a smart check for uniqueness
