@@ -90,10 +90,28 @@ router.get('/public', async (req, res) => {
 // Protected routes
 router.get('/', authenticateToken, async (req, res) => {
   try {
+    // Get regular domains
     const [domains] = await pool.query('SELECT * FROM domains ORDER BY created_at DESC');
-    res.json(domains);
+    
+    // Get user's verified custom domains
+    const [customDomains] = await pool.query(
+      'SELECT id, domain FROM custom_domains WHERE user_id = ? AND status = ? ORDER BY created_at DESC',
+      [req.user.id, 'verified']
+    );
+    
+    // Add isCustom flag to custom domains
+    const customDomainsWithFlag = customDomains.map(domain => ({
+      ...domain,
+      isCustom: true
+    }));
+    
+    // Combine regular domains and verified custom domains
+    const allDomains = [...domains, ...customDomainsWithFlag];
+    
+    res.json(allDomains);
   } catch (error) {
-    res.status(400).json({ error: 'Failed to fetch domains' });
+    console.error('Failed to fetch domains:', error);
+    res.status(500).json({ error: 'Failed to fetch domains' });
   }
 });
 
