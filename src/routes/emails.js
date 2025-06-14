@@ -5,6 +5,7 @@ import { pool } from '../db/init.js';
 import compression from 'compression';
 import { rateLimitMiddleware, verifyCaptcha, checkCaptchaRequired, rateLimitStore } from '../middleware/rateLimit.js';
 import nodemailer from 'nodemailer';
+import { validateEmail, sanitizeText, validateInteger, validateUUID, createValidationMiddleware } from '../utils/inputValidation.js';
 import { 
   getTempEmails, 
   getTempEmailById, 
@@ -384,10 +385,10 @@ router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRe
       // Insert temp email with proper domain handling
       if (isCustomDomain) {
         // For custom domains: set domain_id to NULL, use custom_domain_id
-        await connection.query(
+      await connection.query(
           'INSERT INTO temp_emails (id, user_id, email, domain_id, custom_domain_id, expires_at) VALUES (?, ?, ?, NULL, ?, ?)',
-          [id, req.user.id, email, domainId, mysqlExpiresAt]
-        );
+        [id, req.user.id, email, domainId, mysqlExpiresAt]
+      );
       } else {
         // For regular domains: use domain_id, set custom_domain_id to NULL
         await connection.query(

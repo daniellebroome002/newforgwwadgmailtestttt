@@ -4,6 +4,7 @@ import { authenticateToken, requireAdmin } from '../middleware/auth.js';
 import { pool } from '../db/init.js';
 import dns from 'dns';
 import axios from 'axios';
+import { validateDomain, sanitizeText, createValidationMiddleware } from '../utils/inputValidation.js';
 
 const router = express.Router();
 
@@ -147,21 +148,21 @@ router.get('/custom', authenticateToken, async (req, res) => {
 });
 
 // Add custom domain
-router.post('/custom/add', authenticateToken, async (req, res) => {
+router.post('/custom/add', authenticateToken, createValidationMiddleware({
+  domain: { required: true, type: 'domain', maxLength: 253 }
+}), async (req, res) => {
   try {
     const { domain } = req.body;
     
-    if (!domain || !domain.trim()) {
-      return res.status(400).json({ error: 'Domain is required' });
+    // Use centralized validation
+    const { isValid, sanitized } = validateDomain(domain);
+    if (!isValid) {
+      return res.status(400).json({ 
+        error: 'Invalid domain format. Subdomains are supported (e.g., mail.example.com)' 
+      });
     }
 
-    // Basic domain validation
-    const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?\.[a-zA-Z]{2,}$/;
-    if (!domainRegex.test(domain.trim())) {
-      return res.status(400).json({ error: 'Invalid domain format' });
-    }
-
-    const cleanDomain = domain.trim().toLowerCase();
+    const cleanDomain = sanitized;
     const id = uuidv4();
 
     // Check if domain already exists
