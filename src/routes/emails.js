@@ -4,7 +4,7 @@ import { authenticateToken, authenticateAnyToken } from '../middleware/auth.js';
 import { pool } from '../db/init.js';
 import compression from 'compression';
 import { rateLimitMiddleware, verifyCaptcha, checkCaptchaRequired, rateLimitStore } from '../middleware/rateLimit.js';
-import { customDomainRateLimitMiddleware, incrementCustomDomainUsage, decrementCustomDomainUsage, invalidateUserCache } from '../middleware/customDomainRateLimit.js';
+import { customDomainRateLimitMiddleware, incrementCustomDomainUsage, decrementCustomDomainUsage } from '../middleware/customDomainRateLimit.js';
 import nodemailer from 'nodemailer';
 import { validateEmail, sanitizeText, validateInteger, validateUUID, createValidationMiddleware } from '../utils/inputValidation.js';
 import { 
@@ -419,9 +419,7 @@ router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRe
       
       // Increment custom domain usage if applicable
       if (req.customDomainInfo) {
-        await incrementCustomDomainUsage(req.customDomainInfo.id);
-        // Invalidate cache to ensure fresh data on next request
-        invalidateUserCache(req.user.id);
+        incrementCustomDomainUsage(req.customDomainInfo.id);
       }
       
       res.json(newEmail);
@@ -454,7 +452,8 @@ router.delete('/delete/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Email not found' });
     }
 
-    const isCustomDomainEmail = tempEmailCheck[0].custom_domain_id !== null;
+    const customDomainId = tempEmailCheck[0].custom_domain_id;
+    const isCustomDomainEmail = customDomainId !== null;
 
     // First, delete all received emails
     const [deleteReceivedResult] = await connection.query(
@@ -479,10 +478,8 @@ router.delete('/delete/:id', authenticateToken, async (req, res) => {
     removeCachedEmail(req.user.id, req.params.id);
     
     // Decrement custom domain usage if this was a custom domain email
-    if (isCustomDomainEmail) {
-      await decrementCustomDomainUsage(req.params.id);
-      // Invalidate cache to ensure fresh data on next request
-      invalidateUserCache(req.user.id);
+    if (isCustomDomainEmail && customDomainId) {
+      await decrementCustomDomainUsage(customDomainId, req.user.id);
     }
     
     res.json({ message: 'Email deleted successfully' });
