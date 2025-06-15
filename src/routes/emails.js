@@ -4,6 +4,7 @@ import { authenticateToken, authenticateAnyToken } from '../middleware/auth.js';
 import { pool } from '../db/init.js';
 import compression from 'compression';
 import { rateLimitMiddleware, verifyCaptcha, checkCaptchaRequired, rateLimitStore } from '../middleware/rateLimit.js';
+import { customDomainRateLimitMiddleware, incrementCustomDomainUsage } from '../middleware/customDomainRateLimit.js';
 import nodemailer from 'nodemailer';
 import { validateEmail, sanitizeText, validateInteger, validateUUID, createValidationMiddleware } from '../utils/inputValidation.js';
 import { 
@@ -283,7 +284,7 @@ router.get('/:id/received', authenticateAnyToken, async (req, res) => {
 });
 
 // Create a new temporary email
-router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRequired, verifyCaptcha, async (req, res) => {
+router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRequired, verifyCaptcha, customDomainRateLimitMiddleware, async (req, res) => {
   try {
     const { email, domainId, expiresAt, captchaResponse } = req.body;
     
@@ -415,6 +416,11 @@ router.post('/create', authenticateAnyToken, rateLimitMiddleware, checkCaptchaRe
       // Add to the cache for fast access
       const newEmail = createdEmail[0];
       cacheAddedEmail(req.user.id, newEmail);
+      
+      // Increment custom domain usage if applicable
+      if (req.customDomainInfo) {
+        incrementCustomDomainUsage(req.customDomainInfo.id);
+      }
       
       res.json(newEmail);
     } catch (error) {

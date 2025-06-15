@@ -5,6 +5,7 @@ import { pool } from '../db/init.js';
 import dns from 'dns';
 import axios from 'axios';
 import { validateDomain, sanitizeText, createValidationMiddleware } from '../utils/inputValidation.js';
+import { checkCustomDomainLimits } from '../middleware/customDomainRateLimit.js';
 import { syncAllDomainsToMailserver, checkMailserverHealth } from '../services/domainSyncService.js';
 
 const router = express.Router();
@@ -141,7 +142,47 @@ router.get('/custom', authenticateToken, async (req, res) => {
       'SELECT * FROM custom_domains WHERE user_id = ? ORDER BY created_at DESC',
       [req.user.id]
     );
-    res.json(customDomains);
+    
+    // Add usage information for verified domains
+    const domainsWithUsage = await Promise.all(
+      customDomains.map(async (domain) => {
+        if (domain.status === 'verified') {
+          const limits = await checkCustomDomainLimits(domain.id);
+          return {
+            ...domain,
+            usage: {
+              daily: {
+                current: limits.dailyCount,
+                limit: limits.dailyLimit,
+                remaining: Math.max(0, limits.dailyLimit - limits.dailyCount)
+              },
+              total: {
+                current: limits.totalCount,
+                limit: limits.totalLimit,
+                remaining: Math.max(0, limits.totalLimit - limits.totalCount)
+              },
+              resetTime: limits.resetTime,
+              canCreate: limits.canCreate
+            }
+          };
+        }
+        return domain;
+      })
+    );
+    
+    // Add domain count information
+    const DOMAIN_LIMIT = 2;
+    const response = {
+      domains: domainsWithUsage,
+      limits: {
+        current: customDomains.length,
+        limit: DOMAIN_LIMIT,
+        remaining: Math.max(0, DOMAIN_LIMIT - customDomains.length),
+        canAdd: customDomains.length < DOMAIN_LIMIT
+      }
+    };
+    
+    res.json(response);
   } catch (error) {
     console.error('Failed to fetch custom domains:', error);
     res.status(500).json({ error: 'Failed to fetch custom domains' });
@@ -165,6 +206,25 @@ router.post('/custom/add', authenticateToken, createValidationMiddleware({
 
     const cleanDomain = sanitized;
     const id = uuidv4();
+
+    // Check custom domain count limit (2 per user)
+    const [userDomains] = await pool.query(
+      'SELECT COUNT(*) as domain_count FROM custom_domains WHERE user_id = ?',
+      [req.user.id]
+    );
+    
+    const DOMAIN_LIMIT = 2;
+    if (userDomains[0].domain_count >= DOMAIN_LIMIT) {
+      return res.status(429).json({ 
+        error: 'CUSTOM_DOMAIN_COUNT_LIMIT_EXCEEDED',
+        message: `You can only add ${DOMAIN_LIMIT} custom domains per account`,
+        limits: {
+          current: userDomains[0].domain_count,
+          limit: DOMAIN_LIMIT,
+          remaining: 0
+        }
+      });
+    }
 
     // Check if domain already exists
     const [existing] = await pool.query(
