@@ -1,9 +1,12 @@
 import { pool } from '../db/init.js';
 
-// In-memory cache for custom domain usage (now per user, not per domain)
+// Enhanced in-memory cache with batch operations
 const customDomainUsageCache = {
-  // Structure: { [userId]: { dailyCount: number, totalCount: number, lastReset: Date } }
+  // Structure: { [userId]: { dailyCount: number, totalCount: number, lastReset: Date, dirty: boolean } }
   users: new Map(),
+  
+  // Track pending database operations for batch processing
+  pendingOperations: new Map(), // { [userId]: { dailyDelta: number, totalDelta: number, domainId: string } }
   
   // Clean up expired cache entries (older than 25 hours)
   cleanup() {
@@ -13,6 +16,7 @@ const customDomainUsageCache = {
     for (const [userId, data] of this.users.entries()) {
       if (data.lastReset < cutoff) {
         this.users.delete(userId);
+        this.pendingOperations.delete(userId);
       }
     }
   },
@@ -28,13 +32,91 @@ const customDomainUsageCache = {
       const newData = {
         dailyCount: 0,
         totalCount: data?.totalCount || 0,
-        lastReset: now
+        lastReset: now,
+        dirty: true
       };
       this.users.set(userId, newData);
+      
+      // Mark for database reset
+      this.pendingOperations.set(userId, {
+        dailyDelta: -data?.dailyCount || 0, // Reset daily to 0
+        totalDelta: 0,
+        domainId: null,
+        resetDaily: true
+      });
+      
       return newData;
     }
     
     return data;
+  },
+  
+  // Add pending operation for batch processing
+  addPendingOperation(userId, dailyDelta, totalDelta, domainId = null) {
+    const existing = this.pendingOperations.get(userId) || { dailyDelta: 0, totalDelta: 0, domainId: null };
+    this.pendingOperations.set(userId, {
+      dailyDelta: existing.dailyDelta + dailyDelta,
+      totalDelta: existing.totalDelta + totalDelta,
+      domainId: domainId || existing.domainId,
+      resetDaily: existing.resetDaily || false
+    });
+  },
+  
+  // Process all pending operations in batch
+  async flushPendingOperations() {
+    if (this.pendingOperations.size === 0) return;
+    
+    console.log(`🔄 Flushing ${this.pendingOperations.size} pending custom domain operations to database`);
+    
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      
+      for (const [userId, operation] of this.pendingOperations.entries()) {
+        try {
+          // Get user's custom domains
+          const [domains] = await connection.query(
+            'SELECT id FROM custom_domains WHERE user_id = ? AND status = ?',
+            [userId, 'verified']
+          );
+          
+          if (domains.length > 0) {
+            // Use the specific domain if provided, otherwise use the first one
+            const targetDomainId = operation.domainId || domains[0].id;
+            
+            if (operation.resetDaily) {
+              // Reset daily count for all user's domains
+              await connection.query(
+                'UPDATE custom_domains SET daily_count = 0, last_reset_date = NOW() WHERE user_id = ? AND status = ?',
+                [userId, 'verified']
+              );
+            }
+            
+            if (operation.dailyDelta !== 0 || operation.totalDelta !== 0) {
+              // Update the specific domain with deltas
+              await connection.query(
+                'UPDATE custom_domains SET daily_count = GREATEST(daily_count + ?, 0), total_count = GREATEST(total_count + ?, 0) WHERE id = ?',
+                [operation.dailyDelta, operation.totalDelta, targetDomainId]
+              );
+            }
+          }
+        } catch (error) {
+          console.error(`Error processing operation for user ${userId}:`, error);
+        }
+      }
+      
+      await connection.commit();
+      console.log('✅ Successfully flushed all pending operations to database');
+      
+      // Clear pending operations
+      this.pendingOperations.clear();
+      
+    } catch (error) {
+      await connection.rollback();
+      console.error('❌ Error flushing pending operations:', error);
+    } finally {
+      connection.release();
+    }
   }
 };
 
@@ -63,18 +145,17 @@ async function loadUserUsageFromDB(userId) {
       const usage = {
         dailyCount: shouldResetDaily ? 0 : (total_daily || 0),
         totalCount: total_overall || 0,
-        lastReset: shouldResetDaily ? now : lastReset
+        lastReset: shouldResetDaily ? now : lastReset,
+        dirty: false
       };
       
       // Update cache
       customDomainUsageCache.users.set(userId, usage);
       
-      // Update DB if daily reset happened
+      // Schedule daily reset if needed
       if (shouldResetDaily) {
-        await pool.query(
-          'UPDATE custom_domains SET daily_count = 0, last_reset_date = NOW() WHERE user_id = ? AND status = ?',
-          [userId, 'verified']
-        );
+        customDomainUsageCache.addPendingOperation(userId, -total_daily, 0);
+        customDomainUsageCache.pendingOperations.get(userId).resetDaily = true;
       }
       
       return usage;
@@ -84,7 +165,8 @@ async function loadUserUsageFromDB(userId) {
     const defaultUsage = {
       dailyCount: 0,
       totalCount: 0,
-      lastReset: new Date()
+      lastReset: new Date(),
+      dirty: false
     };
     customDomainUsageCache.users.set(userId, defaultUsage);
     return defaultUsage;
@@ -93,21 +175,9 @@ async function loadUserUsageFromDB(userId) {
     return {
       dailyCount: 0,
       totalCount: 0,
-      lastReset: new Date()
+      lastReset: new Date(),
+      dirty: false
     };
-  }
-}
-
-// Update usage in database (async, non-blocking) - now updates the specific domain that was used
-async function updateUserUsageInDB(userId, domainId, usage) {
-  try {
-    // Update the specific domain that was used for the email creation
-    await pool.query(
-      'UPDATE custom_domains SET daily_count = daily_count + 1, total_count = total_count + 1, last_reset_date = ? WHERE id = ?',
-      [usage.lastReset, domainId]
-    );
-  } catch (error) {
-    console.error('Error updating user usage in DB:', error);
   }
 }
 
@@ -129,18 +199,45 @@ async function getUserUsage(userId) {
   return usage;
 }
 
-// Increment usage counters for a user
+// Increment usage counters for a user (INSTANT cache update, batch DB write)
 async function incrementUserUsage(userId, domainId) {
   const usage = await getUserUsage(userId);
   
+  // Update cache INSTANTLY
   usage.dailyCount++;
   usage.totalCount++;
+  usage.dirty = true;
   
   // Update cache
   customDomainUsageCache.users.set(userId, usage);
   
-  // Update DB asynchronously (don't await to avoid blocking)
-  updateUserUsageInDB(userId, domainId, usage);
+  // Add to pending operations for batch processing
+  customDomainUsageCache.addPendingOperation(userId, 1, 1, domainId);
+  
+  console.log(`📈 Incremented usage for user ${userId}: daily=${usage.dailyCount}, total=${usage.totalCount} (cached)`);
+  
+  return usage;
+}
+
+// Decrement usage counters for a user (INSTANT cache update, batch DB write)
+async function decrementUserUsage(userId, customDomainId) {
+  const usage = await getUserUsage(userId);
+  
+  // Update cache INSTANTLY (only decrement total, not daily)
+  if (usage.totalCount > 0) {
+    usage.totalCount--;
+    usage.dirty = true;
+    
+    // Update cache
+    customDomainUsageCache.users.set(userId, usage);
+    
+    // Add to pending operations for batch processing
+    customDomainUsageCache.addPendingOperation(userId, 0, -1, customDomainId);
+    
+    console.log(`📉 Decremented usage for user ${userId}: daily=${usage.dailyCount}, total=${usage.totalCount} (cached)`);
+    
+    return usage;
+  }
   
   return usage;
 }
@@ -160,7 +257,8 @@ export async function checkCustomDomainLimits(userId) {
     totalCount: usage.totalCount,
     dailyLimit: CUSTOM_DOMAIN_LIMITS.DAILY_LIMIT,
     totalLimit: CUSTOM_DOMAIN_LIMITS.TOTAL_LIMIT,
-    resetTime: new Date(usage.lastReset.getTime() + 24 * 60 * 60 * 1000) // Next day
+    resetTime: new Date(usage.lastReset.getTime() + 24 * 60 * 60 * 1000), // Next day
+    cached: true // Indicate this is from cache for instant response
   };
 }
 
@@ -204,7 +302,8 @@ export async function customDomainRateLimitMiddleware(req, res, next) {
             reached: limitCheck.totalLimitReached
           },
           resetTime: limitCheck.resetTime,
-          domain: customDomain.domain
+          domain: customDomain.domain,
+          cached: limitCheck.cached
         }
       });
     }
@@ -224,22 +323,27 @@ export async function customDomainRateLimitMiddleware(req, res, next) {
   }
 }
 
-// Increment usage after successful email creation
+// Increment usage after successful email creation (INSTANT)
 export async function incrementCustomDomainUsage(domainId) {
-  // Get the user ID for this domain
-  const [customDomains] = await pool.query(
-    'SELECT user_id FROM custom_domains WHERE id = ? AND status = ?',
-    [domainId, 'verified']
-  );
-  
-  if (customDomains.length > 0) {
-    return await incrementUserUsage(customDomains[0].user_id, domainId);
+  try {
+    // Get the user ID for this domain
+    const [customDomains] = await pool.query(
+      'SELECT user_id FROM custom_domains WHERE id = ? AND status = ?',
+      [domainId, 'verified']
+    );
+    
+    if (customDomains.length > 0) {
+      return await incrementUserUsage(customDomains[0].user_id, domainId);
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error incrementing custom domain usage:', error);
+    return null;
   }
-  
-  return null;
 }
 
-// Decrement total count when custom domain email is deleted (daily count stays unchanged)
+// Decrement total count when custom domain email is deleted (INSTANT)
 export async function decrementCustomDomainUsage(customDomainId, userId) {
   try {
     // Verify domain belongs to user and is verified
@@ -253,35 +357,46 @@ export async function decrementCustomDomainUsage(customDomainId, userId) {
       return null; // Domain not found or not verified
     }
     
-    // Update cache - decrement total count only (keep daily count unchanged)
-    const usage = await getUserUsage(userId);
-    if (usage.totalCount > 0) {
-      usage.totalCount--; // Decrement total count
-      // Keep daily count unchanged - users can't get back daily quota by deleting emails
-      
-      // Update cache
-      customDomainUsageCache.users.set(userId, usage);
-      
-      // Update database - decrement total_count only
-      await pool.query(
-        'UPDATE custom_domains SET total_count = GREATEST(total_count - 1, 0) WHERE id = ?',
-        [customDomainId]
-      );
-      
-      console.log(`Decremented total count for user ${userId}, domain ${customDomainId}. New total: ${usage.totalCount}`);
-      return usage;
-    }
-    
-    return usage;
+    return await decrementUserUsage(userId, customDomainId);
   } catch (error) {
     console.error('Error decrementing custom domain usage:', error);
     return null;
   }
 }
 
+// Batch flush pending operations every 30 seconds
+setInterval(async () => {
+  try {
+    await customDomainUsageCache.flushPendingOperations();
+  } catch (error) {
+    console.error('Error in periodic flush:', error);
+  }
+}, 30 * 1000); // Every 30 seconds
+
 // Clean up cache periodically
 setInterval(() => {
   customDomainUsageCache.cleanup();
 }, 60 * 60 * 1000); // Every hour
+
+// Graceful shutdown - flush pending operations
+process.on('SIGTERM', async () => {
+  console.log('🔄 Graceful shutdown: flushing pending custom domain operations...');
+  try {
+    await customDomainUsageCache.flushPendingOperations();
+    console.log('✅ Pending operations flushed successfully');
+  } catch (error) {
+    console.error('❌ Error flushing operations during shutdown:', error);
+  }
+});
+
+process.on('SIGINT', async () => {
+  console.log('🔄 Graceful shutdown: flushing pending custom domain operations...');
+  try {
+    await customDomainUsageCache.flushPendingOperations();
+    console.log('✅ Pending operations flushed successfully');
+  } catch (error) {
+    console.error('❌ Error flushing operations during shutdown:', error);
+  }
+});
 
 export { CUSTOM_DOMAIN_LIMITS }; 
