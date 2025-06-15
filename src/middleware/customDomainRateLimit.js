@@ -139,8 +139,8 @@ async function incrementUserUsage(userId, domainId) {
   // Update cache
   customDomainUsageCache.users.set(userId, usage);
   
-  // Update DB synchronously to ensure consistency
-  await updateUserUsageInDB(userId, domainId, usage);
+  // Update DB asynchronously (don't await to avoid blocking)
+  updateUserUsageInDB(userId, domainId, usage);
   
   return usage;
 }
@@ -240,31 +240,18 @@ export async function incrementCustomDomainUsage(domainId) {
 }
 
 // Decrement total count when custom domain email is deleted (daily count stays unchanged)
-export async function decrementCustomDomainUsage(tempEmailId) {
+export async function decrementCustomDomainUsage(customDomainId, userId) {
   try {
-    // Get the custom domain info for this temp email
-    const [tempEmails] = await pool.query(
-      'SELECT custom_domain_id FROM temp_emails WHERE id = ? AND custom_domain_id IS NOT NULL',
-      [tempEmailId]
-    );
-    
-    if (tempEmails.length === 0) {
-      return null; // Not a custom domain email, no action needed
-    }
-    
-    const customDomainId = tempEmails[0].custom_domain_id;
-    
-    // Get the user ID for this domain
+    // Verify domain belongs to user and is verified
     const [customDomains] = await pool.query(
-      'SELECT user_id FROM custom_domains WHERE id = ? AND status = ?',
-      [customDomainId, 'verified']
+      'SELECT user_id FROM custom_domains WHERE id = ? AND user_id = ? AND status = ?',
+      [customDomainId, userId, 'verified']
     );
     
     if (customDomains.length === 0) {
+      console.log(`Domain ${customDomainId} not found or not verified for user ${userId}`);
       return null; // Domain not found or not verified
     }
-    
-    const userId = customDomains[0].user_id;
     
     // Update cache - decrement total count only (keep daily count unchanged)
     const usage = await getUserUsage(userId);
@@ -290,19 +277,6 @@ export async function decrementCustomDomainUsage(tempEmailId) {
     console.error('Error decrementing custom domain usage:', error);
     return null;
   }
-}
-
-// Function to invalidate user cache (useful for testing and ensuring fresh data)
-export function invalidateUserCache(userId) {
-  customDomainUsageCache.users.delete(userId);
-  console.log(`Cache invalidated for user ${userId}`);
-}
-
-// Function to get fresh usage from DB (bypassing cache)
-export async function getFreshUserUsage(userId) {
-  // Force fresh load from database
-  customDomainUsageCache.users.delete(userId);
-  return await loadUserUsageFromDB(userId);
 }
 
 // Clean up cache periodically
