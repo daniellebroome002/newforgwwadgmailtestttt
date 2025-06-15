@@ -62,8 +62,8 @@ const verifyDomainDNS = (domain) => {
         try {
           // Check if MX record points to our mail server
           const isVerified = addresses.some(mx => 
-            mx.exchange.toLowerCase().includes('mail.vsmailpro.com') || 
-            mx.exchange.toLowerCase().includes('vsmailpro.com')
+            mx.exchange.toLowerCase().includes('custom.boomlify.com') || 
+            mx.exchange.toLowerCase().includes('boomlify.com')
           );
           resolve(isVerified);
         } catch (error) {
