@@ -5,6 +5,7 @@ import { pool } from '../db/init.js';
 import dns from 'dns';
 import axios from 'axios';
 import { validateDomain, sanitizeText, createValidationMiddleware } from '../utils/inputValidation.js';
+import { syncAllDomainsToMailserver, checkMailserverHealth } from '../services/domainSyncService.js';
 
 const router = express.Router();
 
@@ -285,6 +286,93 @@ router.delete('/custom/:id', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Failed to delete custom domain:', error);
     res.status(500).json({ error: 'Failed to delete custom domain' });
+  }
+});
+
+// Manual domain sync endpoint (admin only)
+router.post('/sync', async (req, res) => {
+  // Check admin access
+  const adminAccess = req.headers['admin-access'];
+  if (adminAccess !== process.env.ADMIN_PASSPHRASE) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  try {
+    console.log('🔄 Manual domain sync triggered by admin');
+    
+    // Check mailserver health first
+    const healthCheck = await checkMailserverHealth();
+    
+    if (!healthCheck.healthy) {
+      return res.status(503).json({
+        error: 'Mailserver is not healthy',
+        details: healthCheck.error,
+        url: healthCheck.url
+      });
+    }
+    
+    // Perform domain sync
+    const syncResult = await syncAllDomainsToMailserver();
+    
+    if (syncResult.success) {
+      res.json({
+        success: true,
+        message: 'Domain sync completed successfully',
+        synced: syncResult.synced,
+        failed: syncResult.failed,
+        failedDomains: syncResult.failedDomains,
+        mailserverUrl: healthCheck.url
+      });
+    } else {
+      res.status(500).json({
+        error: 'Domain sync failed',
+        details: syncResult.error,
+        synced: syncResult.synced,
+        failed: syncResult.failed
+      });
+    }
+    
+  } catch (error) {
+    console.error('Manual domain sync error:', error);
+    res.status(500).json({
+      error: 'Failed to perform domain sync',
+      details: error.message
+    });
+  }
+});
+
+// Mailserver health check endpoint (admin only)
+router.get('/mailserver/health', async (req, res) => {
+  // Check admin access
+  const adminAccess = req.headers['admin-access'];
+  if (adminAccess !== process.env.ADMIN_PASSPHRASE) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  try {
+    const healthCheck = await checkMailserverHealth();
+    
+    if (healthCheck.healthy) {
+      res.json({
+        healthy: true,
+        status: healthCheck.status,
+        url: healthCheck.url,
+        message: 'Mailserver is healthy and accessible'
+      });
+    } else {
+      res.status(503).json({
+        healthy: false,
+        error: healthCheck.error,
+        url: healthCheck.url,
+        message: 'Mailserver is not accessible'
+      });
+    }
+    
+  } catch (error) {
+    console.error('Mailserver health check error:', error);
+    res.status(500).json({
+      healthy: false,
+      error: error.message,
+      message: 'Failed to check mailserver health'
+    });
   }
 });
 
