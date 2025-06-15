@@ -139,8 +139,8 @@ async function incrementUserUsage(userId, domainId) {
   // Update cache
   customDomainUsageCache.users.set(userId, usage);
   
-  // Update DB asynchronously (don't await to avoid blocking)
-  updateUserUsageInDB(userId, domainId, usage);
+  // Update DB synchronously to ensure consistency
+  await updateUserUsageInDB(userId, domainId, usage);
   
   return usage;
 }
@@ -290,6 +290,19 @@ export async function decrementCustomDomainUsage(tempEmailId) {
     console.error('Error decrementing custom domain usage:', error);
     return null;
   }
+}
+
+// Function to invalidate user cache (useful for testing and ensuring fresh data)
+export function invalidateUserCache(userId) {
+  customDomainUsageCache.users.delete(userId);
+  console.log(`Cache invalidated for user ${userId}`);
+}
+
+// Function to get fresh usage from DB (bypassing cache)
+export async function getFreshUserUsage(userId) {
+  // Force fresh load from database
+  customDomainUsageCache.users.delete(userId);
+  return await loadUserUsageFromDB(userId);
 }
 
 // Clean up cache periodically

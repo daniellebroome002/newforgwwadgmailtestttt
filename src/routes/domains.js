@@ -5,7 +5,7 @@ import { pool } from '../db/init.js';
 import dns from 'dns';
 import axios from 'axios';
 import { validateDomain, sanitizeText, createValidationMiddleware } from '../utils/inputValidation.js';
-import { checkCustomDomainLimits } from '../middleware/customDomainRateLimit.js';
+import { checkCustomDomainLimits, getFreshUserUsage, invalidateUserCache } from '../middleware/customDomainRateLimit.js';
 import { syncAllDomainsToMailserver, checkMailserverHealth } from '../services/domainSyncService.js';
 
 const router = express.Router();
@@ -148,21 +148,25 @@ router.get('/custom', authenticateToken, async (req, res) => {
     let sharedUsage = null;
     
     if (verifiedDomains.length > 0) {
-      // Get shared usage across all custom domains for this user
+      // Get fresh usage data from database (bypassing cache to ensure accuracy)
       const limits = await checkCustomDomainLimits(req.user.id);
+      
+      // Also get fresh data to double-check
+      const freshUsage = await getFreshUserUsage(req.user.id);
+      
       sharedUsage = {
         daily: {
-          current: limits.dailyCount,
+          current: freshUsage.dailyCount,
           limit: limits.dailyLimit,
-          remaining: Math.max(0, limits.dailyLimit - limits.dailyCount)
+          remaining: Math.max(0, limits.dailyLimit - freshUsage.dailyCount)
         },
         total: {
-          current: limits.totalCount,
+          current: freshUsage.totalCount,
           limit: limits.totalLimit,
-          remaining: Math.max(0, limits.totalLimit - limits.totalCount)
+          remaining: Math.max(0, limits.totalLimit - freshUsage.totalCount)
         },
         resetTime: limits.resetTime,
-        canCreate: limits.canCreate
+        canCreate: !limits.dailyLimitReached && !limits.totalLimitReached
       };
     }
     
