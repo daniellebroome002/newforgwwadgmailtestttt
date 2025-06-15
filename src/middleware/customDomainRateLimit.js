@@ -1,27 +1,27 @@
 import { pool } from '../db/init.js';
 
-// In-memory cache for custom domain usage
+// In-memory cache for custom domain usage (now per user, not per domain)
 const customDomainUsageCache = {
-  // Structure: { [domainId]: { dailyCount: number, totalCount: number, lastReset: Date } }
-  domains: new Map(),
+  // Structure: { [userId]: { dailyCount: number, totalCount: number, lastReset: Date } }
+  users: new Map(),
   
   // Clean up expired cache entries (older than 25 hours)
   cleanup() {
     const now = new Date();
     const cutoff = new Date(now.getTime() - 25 * 60 * 60 * 1000); // 25 hours ago
     
-    for (const [domainId, data] of this.domains.entries()) {
+    for (const [userId, data] of this.users.entries()) {
       if (data.lastReset < cutoff) {
-        this.domains.delete(domainId);
+        this.users.delete(userId);
       }
     }
   },
   
   // Reset daily counters if needed
-  resetDailyIfNeeded(domainId) {
+  resetDailyIfNeeded(userId) {
     const now = new Date();
     const today = now.toDateString();
-    const data = this.domains.get(domainId);
+    const data = this.users.get(userId);
     
     if (!data || data.lastReset.toDateString() !== today) {
       // Reset daily counter
@@ -30,7 +30,7 @@ const customDomainUsageCache = {
         totalCount: data?.totalCount || 0,
         lastReset: now
       };
-      this.domains.set(domainId, newData);
+      this.users.set(userId, newData);
       return newData;
     }
     
@@ -44,112 +44,110 @@ const CUSTOM_DOMAIN_LIMITS = {
   TOTAL_LIMIT: 100
 };
 
-// Load usage from database for a domain
-async function loadDomainUsageFromDB(domainId) {
+// Load usage from database for a user (sum across all their custom domains)
+async function loadUserUsageFromDB(userId) {
   try {
     const [results] = await pool.query(
-      'SELECT daily_count, total_count, last_reset_date FROM custom_domains WHERE id = ?',
-      [domainId]
+      'SELECT SUM(daily_count) as total_daily, SUM(total_count) as total_overall, MAX(last_reset_date) as last_reset FROM custom_domains WHERE user_id = ? AND status = ?',
+      [userId, 'verified']
     );
     
-    if (results.length > 0) {
-      const { daily_count, total_count, last_reset_date } = results[0];
+    if (results.length > 0 && results[0].total_daily !== null) {
+      const { total_daily, total_overall, last_reset } = results[0];
       const now = new Date();
-      const lastReset = last_reset_date ? new Date(last_reset_date) : new Date(0);
+      const lastReset = last_reset ? new Date(last_reset) : new Date(0);
       
       // Check if we need to reset daily counter
       const shouldResetDaily = lastReset.toDateString() !== now.toDateString();
       
       const usage = {
-        dailyCount: shouldResetDaily ? 0 : (daily_count || 0),
-        totalCount: total_count || 0,
+        dailyCount: shouldResetDaily ? 0 : (total_daily || 0),
+        totalCount: total_overall || 0,
         lastReset: shouldResetDaily ? now : lastReset
       };
       
       // Update cache
-      customDomainUsageCache.domains.set(domainId, usage);
+      customDomainUsageCache.users.set(userId, usage);
       
       // Update DB if daily reset happened
       if (shouldResetDaily) {
         await pool.query(
-          'UPDATE custom_domains SET daily_count = 0, last_reset_date = NOW() WHERE id = ?',
-          [domainId]
+          'UPDATE custom_domains SET daily_count = 0, last_reset_date = NOW() WHERE user_id = ? AND status = ?',
+          [userId, 'verified']
         );
       }
       
       return usage;
     }
     
-    return null;
+    // Return default usage if no domains found
+    const defaultUsage = {
+      dailyCount: 0,
+      totalCount: 0,
+      lastReset: new Date()
+    };
+    customDomainUsageCache.users.set(userId, defaultUsage);
+    return defaultUsage;
   } catch (error) {
-    console.error('Error loading domain usage from DB:', error);
-    return null;
+    console.error('Error loading user usage from DB:', error);
+    return {
+      dailyCount: 0,
+      totalCount: 0,
+      lastReset: new Date()
+    };
   }
 }
 
-// Update usage in database (async, non-blocking)
-async function updateDomainUsageInDB(domainId, usage) {
+// Update usage in database (async, non-blocking) - now updates the specific domain that was used
+async function updateUserUsageInDB(userId, domainId, usage) {
   try {
+    // Update the specific domain that was used for the email creation
     await pool.query(
-      'UPDATE custom_domains SET daily_count = ?, total_count = ?, last_reset_date = ? WHERE id = ?',
-      [usage.dailyCount, usage.totalCount, usage.lastReset, domainId]
+      'UPDATE custom_domains SET daily_count = daily_count + 1, total_count = total_count + 1, last_reset_date = ? WHERE id = ?',
+      [usage.lastReset, domainId]
     );
   } catch (error) {
-    console.error('Error updating domain usage in DB:', error);
+    console.error('Error updating user usage in DB:', error);
   }
 }
 
-// Get domain usage (cache-first, then DB)
-async function getDomainUsage(domainId) {
+// Get user usage across all custom domains (cache-first, then DB)
+async function getUserUsage(userId) {
+  // Clean up old cache entries periodically
+  if (Math.random() < 0.1) { // 10% chance
+    customDomainUsageCache.cleanup();
+  }
+  
   // Try cache first
-  let usage = customDomainUsageCache.domains.get(domainId);
+  let usage = customDomainUsageCache.resetDailyIfNeeded(userId);
   
   if (!usage) {
     // Load from database
-    usage = await loadDomainUsageFromDB(domainId);
-    
-    if (!usage) {
-      // Initialize if not found
-      usage = {
-        dailyCount: 0,
-        totalCount: 0,
-        lastReset: new Date()
-      };
-      customDomainUsageCache.domains.set(domainId, usage);
-      
-      // Initialize in DB
-      await pool.query(
-        'UPDATE custom_domains SET daily_count = 0, total_count = 0, last_reset_date = NOW() WHERE id = ?',
-        [domainId]
-      );
-    }
+    usage = await loadUserUsageFromDB(userId);
   }
-  
-  // Reset daily counter if needed
-  usage = customDomainUsageCache.resetDailyIfNeeded(domainId);
   
   return usage;
 }
 
-// Increment usage counters
-async function incrementDomainUsage(domainId) {
-  const usage = await getDomainUsage(domainId);
+// Increment usage counters for a user
+async function incrementUserUsage(userId, domainId) {
+  const usage = await getUserUsage(userId);
   
   usage.dailyCount++;
   usage.totalCount++;
   
   // Update cache
-  customDomainUsageCache.domains.set(domainId, usage);
+  customDomainUsageCache.users.set(userId, usage);
   
   // Update DB asynchronously (don't await to avoid blocking)
-  updateDomainUsageInDB(domainId, usage);
+  updateUserUsageInDB(userId, domainId, usage);
   
   return usage;
 }
 
-// Check if domain has reached limits
-export async function checkCustomDomainLimits(domainId) {
-  const usage = await getDomainUsage(domainId);
+// Check if user has reached limits across all their custom domains
+export async function checkCustomDomainLimits(userId) {
+  const usage = await getUserUsage(userId);
   
   const dailyLimitReached = usage.dailyCount >= CUSTOM_DOMAIN_LIMITS.DAILY_LIMIT;
   const totalLimitReached = usage.totalCount >= CUSTOM_DOMAIN_LIMITS.TOTAL_LIMIT;
@@ -175,9 +173,9 @@ export async function customDomainRateLimitMiddleware(req, res, next) {
       return next(); // No domain specified, let other middleware handle
     }
     
-    // Check if this is a custom domain
+    // Check if this is a custom domain and get user info
     const [customDomains] = await pool.query(
-      'SELECT id, domain FROM custom_domains WHERE id = ? AND status = ?',
+      'SELECT id, domain, user_id FROM custom_domains WHERE id = ? AND status = ?',
       [domainId, 'verified']
     );
     
@@ -187,13 +185,13 @@ export async function customDomainRateLimitMiddleware(req, res, next) {
     
     const customDomain = customDomains[0];
     
-    // Check limits
-    const limitCheck = await checkCustomDomainLimits(domainId);
+    // Check limits for the user (across all their custom domains)
+    const limitCheck = await checkCustomDomainLimits(customDomain.user_id);
     
     if (!limitCheck.canCreate) {
       return res.status(429).json({
         error: 'CUSTOM_DOMAIN_LIMIT_EXCEEDED',
-        message: 'Custom domain email creation limit reached',
+        message: 'Custom domain email creation limit reached across all your domains',
         limits: {
           daily: {
             current: limitCheck.dailyCount,
@@ -215,6 +213,7 @@ export async function customDomainRateLimitMiddleware(req, res, next) {
     req.customDomainInfo = {
       id: domainId,
       domain: customDomain.domain,
+      userId: customDomain.user_id,
       limits: limitCheck
     };
     
@@ -227,7 +226,17 @@ export async function customDomainRateLimitMiddleware(req, res, next) {
 
 // Increment usage after successful email creation
 export async function incrementCustomDomainUsage(domainId) {
-  return await incrementDomainUsage(domainId);
+  // Get the user ID for this domain
+  const [customDomains] = await pool.query(
+    'SELECT user_id FROM custom_domains WHERE id = ? AND status = ?',
+    [domainId, 'verified']
+  );
+  
+  if (customDomains.length > 0) {
+    return await incrementUserUsage(customDomains[0].user_id, domainId);
+  }
+  
+  return null;
 }
 
 // Clean up cache periodically

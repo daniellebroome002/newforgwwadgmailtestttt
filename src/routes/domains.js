@@ -143,32 +143,39 @@ router.get('/custom', authenticateToken, async (req, res) => {
       [req.user.id]
     );
     
-    // Add usage information for verified domains
-    const domainsWithUsage = await Promise.all(
-      customDomains.map(async (domain) => {
-        if (domain.status === 'verified') {
-          const limits = await checkCustomDomainLimits(domain.id);
-          return {
-            ...domain,
-            usage: {
-              daily: {
-                current: limits.dailyCount,
-                limit: limits.dailyLimit,
-                remaining: Math.max(0, limits.dailyLimit - limits.dailyCount)
-              },
-              total: {
-                current: limits.totalCount,
-                limit: limits.totalLimit,
-                remaining: Math.max(0, limits.totalLimit - limits.totalCount)
-              },
-              resetTime: limits.resetTime,
-              canCreate: limits.canCreate
-            }
-          };
-        }
-        return domain;
-      })
-    );
+    // Add usage information (shared across all verified domains for this user)
+    const verifiedDomains = customDomains.filter(domain => domain.status === 'verified');
+    let sharedUsage = null;
+    
+    if (verifiedDomains.length > 0) {
+      // Get shared usage across all custom domains for this user
+      const limits = await checkCustomDomainLimits(req.user.id);
+      sharedUsage = {
+        daily: {
+          current: limits.dailyCount,
+          limit: limits.dailyLimit,
+          remaining: Math.max(0, limits.dailyLimit - limits.dailyCount)
+        },
+        total: {
+          current: limits.totalCount,
+          limit: limits.totalLimit,
+          remaining: Math.max(0, limits.totalLimit - limits.totalCount)
+        },
+        resetTime: limits.resetTime,
+        canCreate: limits.canCreate
+      };
+    }
+    
+    // Add shared usage to all verified domains
+    const domainsWithUsage = customDomains.map(domain => {
+      if (domain.status === 'verified' && sharedUsage) {
+        return {
+          ...domain,
+          usage: sharedUsage
+        };
+      }
+      return domain;
+    });
     
     // Add domain count information
     const DOMAIN_LIMIT = 2;
