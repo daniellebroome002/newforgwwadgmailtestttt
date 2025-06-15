@@ -239,6 +239,59 @@ export async function incrementCustomDomainUsage(domainId) {
   return null;
 }
 
+// Decrement total count when custom domain email is deleted (daily count stays unchanged)
+export async function decrementCustomDomainUsage(tempEmailId) {
+  try {
+    // Get the custom domain info for this temp email
+    const [tempEmails] = await pool.query(
+      'SELECT custom_domain_id FROM temp_emails WHERE id = ? AND custom_domain_id IS NOT NULL',
+      [tempEmailId]
+    );
+    
+    if (tempEmails.length === 0) {
+      return null; // Not a custom domain email, no action needed
+    }
+    
+    const customDomainId = tempEmails[0].custom_domain_id;
+    
+    // Get the user ID for this domain
+    const [customDomains] = await pool.query(
+      'SELECT user_id FROM custom_domains WHERE id = ? AND status = ?',
+      [customDomainId, 'verified']
+    );
+    
+    if (customDomains.length === 0) {
+      return null; // Domain not found or not verified
+    }
+    
+    const userId = customDomains[0].user_id;
+    
+    // Update cache - decrement total count only (keep daily count unchanged)
+    const usage = await getUserUsage(userId);
+    if (usage.totalCount > 0) {
+      usage.totalCount--; // Decrement total count
+      // Keep daily count unchanged - users can't get back daily quota by deleting emails
+      
+      // Update cache
+      customDomainUsageCache.users.set(userId, usage);
+      
+      // Update database - decrement total_count only
+      await pool.query(
+        'UPDATE custom_domains SET total_count = GREATEST(total_count - 1, 0) WHERE id = ?',
+        [customDomainId]
+      );
+      
+      console.log(`Decremented total count for user ${userId}, domain ${customDomainId}. New total: ${usage.totalCount}`);
+      return usage;
+    }
+    
+    return usage;
+  } catch (error) {
+    console.error('Error decrementing custom domain usage:', error);
+    return null;
+  }
+}
+
 // Clean up cache periodically
 setInterval(() => {
   customDomainUsageCache.cleanup();

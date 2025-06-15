@@ -4,7 +4,7 @@ import { authenticateToken, authenticateAnyToken } from '../middleware/auth.js';
 import { pool } from '../db/init.js';
 import compression from 'compression';
 import { rateLimitMiddleware, verifyCaptcha, checkCaptchaRequired, rateLimitStore } from '../middleware/rateLimit.js';
-import { customDomainRateLimitMiddleware, incrementCustomDomainUsage } from '../middleware/customDomainRateLimit.js';
+import { customDomainRateLimitMiddleware, incrementCustomDomainUsage, decrementCustomDomainUsage } from '../middleware/customDomainRateLimit.js';
 import nodemailer from 'nodemailer';
 import { validateEmail, sanitizeText, validateInteger, validateUUID, createValidationMiddleware } from '../utils/inputValidation.js';
 import { 
@@ -441,6 +441,19 @@ router.delete('/delete/:id', authenticateToken, async (req, res) => {
   try {
     await connection.beginTransaction();
 
+    // Check if this is a custom domain email before deletion (for usage decrement)
+    const [tempEmailCheck] = await connection.query(
+      'SELECT custom_domain_id FROM temp_emails WHERE id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+
+    if (tempEmailCheck.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Email not found' });
+    }
+
+    const isCustomDomainEmail = tempEmailCheck[0].custom_domain_id !== null;
+
     // First, delete all received emails
     const [deleteReceivedResult] = await connection.query(
       'DELETE FROM received_emails WHERE temp_email_id = ?',
@@ -462,6 +475,11 @@ router.delete('/delete/:id', authenticateToken, async (req, res) => {
     
     // Remove from cache
     removeCachedEmail(req.user.id, req.params.id);
+    
+    // Decrement custom domain usage if this was a custom domain email
+    if (isCustomDomainEmail) {
+      await decrementCustomDomainUsage(req.params.id);
+    }
     
     res.json({ message: 'Email deleted successfully' });
   } catch (error) {
