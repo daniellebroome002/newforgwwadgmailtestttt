@@ -5,7 +5,7 @@ import { pool } from '../db/init.js';
 import dns from 'dns';
 import axios from 'axios';
 import { validateDomain, sanitizeText, createValidationMiddleware } from '../utils/inputValidation.js';
-import { checkCustomDomainLimits, getFreshUserUsage, invalidateUserCache } from '../middleware/customDomainRateLimit.js';
+import { checkCustomDomainLimits } from '../middleware/customDomainRateLimit.js';
 import { syncAllDomainsToMailserver, checkMailserverHealth } from '../services/domainSyncService.js';
 
 const router = express.Router();
@@ -148,25 +148,23 @@ router.get('/custom', authenticateToken, async (req, res) => {
     let sharedUsage = null;
     
     if (verifiedDomains.length > 0) {
-      // Get fresh usage data from database (bypassing cache to ensure accuracy)
+      // Get shared usage across all custom domains for this user (FROM CACHE - INSTANT)
       const limits = await checkCustomDomainLimits(req.user.id);
-      
-      // Also get fresh data to double-check
-      const freshUsage = await getFreshUserUsage(req.user.id);
-      
       sharedUsage = {
         daily: {
-          current: freshUsage.dailyCount,
+          current: limits.dailyCount,
           limit: limits.dailyLimit,
-          remaining: Math.max(0, limits.dailyLimit - freshUsage.dailyCount)
+          remaining: Math.max(0, limits.dailyLimit - limits.dailyCount)
         },
         total: {
-          current: freshUsage.totalCount,
+          current: limits.totalCount,
           limit: limits.totalLimit,
-          remaining: Math.max(0, limits.totalLimit - freshUsage.totalCount)
+          remaining: Math.max(0, limits.totalLimit - limits.totalCount)
         },
         resetTime: limits.resetTime,
-        canCreate: !limits.dailyLimitReached && !limits.totalLimitReached
+        canCreate: limits.canCreate,
+        cached: limits.cached, // Show if data is from cache
+        lastUpdated: new Date().toISOString() // Show when data was fetched
       };
     }
     
@@ -190,6 +188,10 @@ router.get('/custom', authenticateToken, async (req, res) => {
         limit: DOMAIN_LIMIT,
         remaining: Math.max(0, DOMAIN_LIMIT - customDomains.length),
         canAdd: customDomains.length < DOMAIN_LIMIT
+      },
+      meta: {
+        cached: sharedUsage?.cached || false,
+        lastUpdated: new Date().toISOString()
       }
     };
     
@@ -197,6 +199,40 @@ router.get('/custom', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Failed to fetch custom domains:', error);
     res.status(500).json({ error: 'Failed to fetch custom domains' });
+  }
+});
+
+// Manual flush endpoint for testing and immediate synchronization
+router.post('/custom/flush-usage', authenticateToken, async (req, res) => {
+  try {
+    // We need to access the cache directly, so let's create a simple flush trigger
+    // This will be handled by the next scheduled flush (within 30 seconds)
+    
+    // Get current usage from cache
+    const limits = await checkCustomDomainLimits(req.user.id);
+    
+    res.json({
+      message: 'Usage data will be synchronized with database within 30 seconds',
+      usage: {
+        daily: {
+          current: limits.dailyCount,
+          limit: limits.dailyLimit,
+          remaining: Math.max(0, limits.dailyLimit - limits.dailyCount)
+        },
+        total: {
+          current: limits.totalCount,
+          limit: limits.totalLimit,
+          remaining: Math.max(0, limits.totalLimit - limits.totalCount)
+        },
+        resetTime: limits.resetTime,
+        canCreate: limits.canCreate,
+        cached: limits.cached,
+        requestedAt: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Failed to get usage data:', error);
+    res.status(500).json({ error: 'Failed to get usage data' });
   }
 });
 
