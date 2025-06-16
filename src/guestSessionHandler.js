@@ -78,7 +78,7 @@ setInterval(() => {
 /**
  * Cache temp emails for a registered user to reduce database load
  * @param {string} userId - User ID
- * @param {Array} emails - Array of temp emails from database
+ * @param {Array} emails - Array of temp emails from database (with lastEmail included)
  */
 export async function cacheUserEmails(userId, emails) {
   // Clear any existing cache entries for this user
@@ -97,7 +97,7 @@ export async function cacheUserEmails(userId, emails) {
     lastFetched: new Date()
   };
   
-  // Add each email to the cache
+  // Add each email to the cache (emails now include lastEmail from optimized query)
   for (const email of emails) {
     userCache.emails.set(email.id, email);
     userCache.inbox.set(email.id, []);
@@ -111,6 +111,7 @@ export async function cacheUserEmails(userId, emails) {
   
   // Optional: Pre-fetch and cache received emails for each temp email
   // This is a performance optimization that loads inbox data in the background
+  // Note: We still do this for full inbox caching, but lastEmail is already cached
   for (const email of emails) {
     try {
       const [receivedEmails] = await pool.query(
@@ -343,7 +344,33 @@ export function getTempEmails(token) {
     const session = guestSessions.get(token);
     if (!session) return [];
     
-    return Array.from(session.emails.values());
+    // Get all temp emails and include their last received message
+    const emails = Array.from(session.emails.values());
+    
+    // For each email, get the last received message from the inbox
+    const emailsWithLastMessage = emails.map(email => {
+      const inbox = session.inbox.get(email.id) || [];
+      
+      // Sort inbox by received_at desc and get the latest message
+      const sortedInbox = [...inbox].sort((a, b) => 
+        new Date(b.received_at).getTime() - new Date(a.received_at).getTime()
+      );
+      
+      const lastEmail = sortedInbox.length > 0 ? sortedInbox[0] : null;
+      
+      return {
+        ...email,
+        lastEmail: lastEmail ? {
+          id: lastEmail.id,
+          subject: lastEmail.subject || 'No Subject',
+          from_email: lastEmail.from_email,
+          from_name: lastEmail.from_name,
+          received_at: lastEmail.received_at
+        } : null
+      };
+    });
+    
+    return emailsWithLastMessage;
   } catch (error) {
     console.error('Error retrieving temp emails:', error);
     return [];
