@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { authenticateToken } from '../middleware/auth.js';
 import { pool } from '../db/init.js';
 import { v4 as uuidv4 } from 'uuid';
+import { getUserUsageStats, getTomorrowMidnight } from '../services/apiMemoryStore.js';
 
 const router = express.Router();
 
@@ -198,24 +199,10 @@ router.get('/api-status', authenticateToken, async (req, res) => {
 
     const hasApiKey = settings.length > 0 && settings[0].api_key;
 
-    // Get today's usage if user has API key
+    // Get today's usage from memory store (real-time data)
     let todayUsage = null;
     if (hasApiKey) {
-      const today = new Date().toISOString().split('T')[0];
-      const [usage] = await pool.query(
-        'SELECT tier_10min, tier_1hour, tier_1day FROM api_usage_daily WHERE user_id = ? AND date = ?',
-        [req.user.id, today]
-      );
-      
-      if (usage.length > 0) {
-        todayUsage = {
-          '10min': usage[0].tier_10min || 0,
-          '1hour': usage[0].tier_1hour || 0,
-          '1day': usage[0].tier_1day || 0
-        };
-      } else {
-        todayUsage = { '10min': 0, '1hour': 0, '1day': 0 };
-      }
+      todayUsage = getUserUsageStats(req.user.id);
     }
 
     res.json({
@@ -236,6 +223,7 @@ router.get('/api-status', authenticateToken, async (req, res) => {
         '1hour': { daily: 10 },
         '1day': { daily: 5 }
       },
+      reset_time: getTomorrowMidnight(),
       meta: {
         user_id: req.user.id,
         request_time: new Date().toISOString()
