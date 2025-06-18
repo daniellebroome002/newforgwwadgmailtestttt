@@ -357,4 +357,20 @@ setInterval(cleanupExpiredData, 60 * 60 * 1000);
 // Initial cleanup on startup
 setTimeout(cleanupExpiredData, 5000);
 
-console.log('API Memory Store initialized with periodic sync and cleanup'); 
+/**
+ * Initialize the API memory store
+ */
+export const initializeApiMemoryStore = () => {
+  console.log('API Memory Store initialized with periodic sync and cleanup');
+  
+  // Run initial cleanup
+  setTimeout(cleanupExpiredData, 5000);
+  
+  return {
+    emailCount: apiEmailStore.size,
+    userCount: userApiEmailIndex.size,
+    usageCounterCount: usageCounters.size
+  };
+};
+
+console.log('API Memory Store loaded'); 
