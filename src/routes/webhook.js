@@ -10,6 +10,10 @@ import {
   findRegisteredUserByEmail, 
   cacheReceivedEmail
 } from '../guestSessionHandler.js';
+import { 
+  findApiUserByEmail, 
+  addApiEmailMessage 
+} from '../services/apiMemoryStore.js';
 
 // Email parsing helper functions
 function extractSenderEmail(emailFrom) {
@@ -185,19 +189,22 @@ router.post('/email/incoming', express.urlencoded({ extended: true }), async (re
       is_spam: false // You could add spam detection logic here
     };
     
-    // 1. FIRST: Check if the recipient belongs to a guest user
+    // 1. FIRST: Check if the recipient belongs to an API user
+    const apiUserInfo = findApiUserByEmail(cleanRecipient);
+    
+    // 2. SECOND: Check if the recipient belongs to a guest user
     const guestInfo = findGuestByEmail(cleanRecipient);
     
-    // 2. SECOND: Check if it belongs to a registered user in cache
+    // 3. THIRD: Check if it belongs to a registered user in cache
     const registeredInfo = findRegisteredUserByEmail(cleanRecipient);
     
-    // 3. THIRD: Check if it exists in the database (regular domains)
+    // 4. FOURTH: Check if it exists in the database (regular domains)
     const [tempEmails] = await pool.query(
       'SELECT id, user_id FROM temp_emails WHERE email = ? AND expires_at > NOW()',
       [cleanRecipient]
     );
     
-    // 4. FOURTH: Check if it's from a custom domain
+    // 5. FIFTH: Check if it's from a custom domain
     const recipientDomain = cleanRecipient.split('@')[1];
     const [customDomainEmails] = await pool.query(
       `SELECT te.id, te.user_id, cd.domain 
@@ -207,7 +214,30 @@ router.post('/email/incoming', express.urlencoded({ extended: true }), async (re
       [cleanRecipient, recipientDomain]
     );
     
-    // Process in priority order: guest, registered cache, database
+    // Process in priority order: API, guest, registered cache, database
+    
+    // Handle API emails first (highest priority)
+    if (apiUserInfo) {
+      console.log(`Received email for API user: ${cleanRecipient}`);
+      const success = addApiEmailMessage(apiUserInfo.emailId, emailData);
+      
+      if (success) {
+        return res.status(200).json({ 
+          success: true, 
+          message: 'Email stored in API memory store',
+          emailId: emailData.id,
+          type: 'api_email'
+        });
+      } else {
+        // API email might have expired
+        return res.status(404).json({ 
+          success: false, 
+          message: 'API email expired or not found',
+          recipient: cleanRecipient,
+          type: 'api_email_expired'
+        });
+      }
+    }
     
     // Handle potential conflicts between memory caches and database
     if ((guestInfo || registeredInfo) && tempEmails.length > 0) {

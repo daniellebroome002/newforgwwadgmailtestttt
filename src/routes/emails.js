@@ -560,111 +560,34 @@ router.get('/', authenticateAnyToken, async (req, res) => {
       const [countResult] = await pool.query(countQuery, countParams);
       const totalCount = countResult[0].total;
 
-      // *** OPTIMIZED QUERY: Single JOIN to get emails WITH last messages ***
-      // This eliminates the N+1 query problem by getting everything in one call
-      let dataQuery = `
-        SELECT 
-          te.*,
-          re.subject as last_email_subject,
-          re.from_email as last_email_from,
-          re.from_name as last_email_from_name,
-          re.received_at as last_email_received_at,
-          re.id as last_email_id
-        FROM temp_emails te
-        LEFT JOIN (
-          SELECT 
-            temp_email_id,
-            subject,
-            from_email,
-            from_name,
-            received_at,
-            id,
-            ROW_NUMBER() OVER (PARTITION BY temp_email_id ORDER BY received_at DESC) as rn
-          FROM received_emails
-        ) re ON te.id = re.temp_email_id AND re.rn = 1
-        WHERE te.user_id = ?
-      `;
+      // Get ALL emails for caching (not just the paginated ones)
+      // This improves performance for subsequent requests
+      const [allEmails] = await pool.query(
+        'SELECT * FROM temp_emails WHERE user_id = ? ORDER BY created_at DESC',
+        [req.user.id]
+      );
+      
+      // Cache the emails for future requests
+      await cacheUserEmails(userId, allEmails);
+      
+      // Now get emails with search and pagination
+      let dataQuery = 'SELECT * FROM temp_emails WHERE user_id = ?';
       let dataParams = [req.user.id];
       
       // Add search condition if search term is provided
       if (search) {
-        dataQuery += ' AND te.email LIKE ?';
+        dataQuery += ' AND email LIKE ?';
         dataParams.push(`%${search}%`);
       }
       
-      dataQuery += ' ORDER BY te.created_at DESC LIMIT ? OFFSET ?';
+      dataQuery += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
       dataParams.push(limit, offset);
       
-      const [emailsWithLastMessage] = await pool.query(dataQuery, dataParams);
-      
-      // Transform the joined data back to the expected structure
-      const transformedEmails = emailsWithLastMessage.map(row => ({
-        id: row.id,
-        email: row.email,
-        domain_id: row.domain_id,
-        custom_domain_id: row.custom_domain_id,
-        user_id: row.user_id,
-        expires_at: row.expires_at,
-        created_at: row.created_at,
-        // Include lastEmail if we have received email data
-        lastEmail: row.last_email_subject ? {
-          id: row.last_email_id,
-          subject: row.last_email_subject,
-          from_email: row.last_email_from,
-          from_name: row.last_email_from_name,
-          received_at: row.last_email_received_at
-        } : null
-      }));
-
-      // Also get ALL emails for caching (with last messages for better cache performance)
-      const [allEmailsWithLastMessage] = await pool.query(`
-        SELECT 
-          te.*,
-          re.subject as last_email_subject,
-          re.from_email as last_email_from,
-          re.from_name as last_email_from_name,
-          re.received_at as last_email_received_at,
-          re.id as last_email_id
-        FROM temp_emails te
-        LEFT JOIN (
-          SELECT 
-            temp_email_id,
-            subject,
-            from_email,
-            from_name,
-            received_at,
-            id,
-            ROW_NUMBER() OVER (PARTITION BY temp_email_id ORDER BY received_at DESC) as rn
-          FROM received_emails
-        ) re ON te.id = re.temp_email_id AND re.rn = 1
-        WHERE te.user_id = ?
-        ORDER BY te.created_at DESC
-      `, [req.user.id]);
-      
-      // Transform all emails for caching
-      const allTransformedEmails = allEmailsWithLastMessage.map(row => ({
-        id: row.id,
-        email: row.email,
-        domain_id: row.domain_id,
-        custom_domain_id: row.custom_domain_id,
-        user_id: row.user_id,
-        expires_at: row.expires_at,
-        created_at: row.created_at,
-        lastEmail: row.last_email_subject ? {
-          id: row.last_email_id,
-          subject: row.last_email_subject,
-          from_email: row.last_email_from,
-          from_name: row.last_email_from_name,
-          received_at: row.last_email_received_at
-        } : null
-      }));
-      
-      // Cache the emails with last messages for future requests
-      await cacheUserEmails(userId, allTransformedEmails);
+      const [paginatedEmails] = await pool.query(dataQuery, dataParams);
       
       // Return the data with pagination metadata
       res.json({
-        data: transformedEmails,
+        data: paginatedEmails,
         metadata: {
           total: totalCount,
           page: page,
