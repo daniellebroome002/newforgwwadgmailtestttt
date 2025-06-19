@@ -1,6 +1,20 @@
 // apiAuth.js - API Key Authentication Middleware
 import { pool } from '../db/init.js';
 
+// Smart caching for API tokens
+const tokenCache = new Map(); // { apiKey: { userInfo, expiresAt } }
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+// Clean expired cache entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of tokenCache.entries()) {
+    if (value.expiresAt <= now) {
+      tokenCache.delete(key);
+    }
+  }
+}, 5 * 60 * 1000); // Clean every 5 minutes
+
 /**
  * Authenticate API key from X-API-Key header
  * Checks against existing premium_settings table
@@ -25,7 +39,15 @@ export const authenticateApiKey = async (req, res, next) => {
   }
 
   try {
-    // Check in existing premium_settings table with user join
+    // Check cache first for instant response
+    const cached = tokenCache.get(apiKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      req.apiUser = cached.userInfo;
+      console.log(`API request from user ${req.apiUser.email} (${req.apiUser.id}) - ${req.method} ${req.path} [CACHED]`);
+      return next();
+    }
+
+    // Cache miss - check database
     const [settings] = await pool.query(`
       SELECT 
         ps.*, 
@@ -56,7 +78,7 @@ export const authenticateApiKey = async (req, res, next) => {
     }
     
     // Attach user info to request object
-    req.apiUser = {
+    const userInfo = {
       id: userSettings.user_id,
       email: userSettings.user_email,
       tier: userSettings.premium_tier || 'free', // Default to free tier
@@ -64,9 +86,17 @@ export const authenticateApiKey = async (req, res, next) => {
       userCreatedAt: userSettings.user_created_at,
       settingsId: userSettings.id
     };
+    
+    req.apiUser = userInfo;
+
+    // Cache the result for future requests
+    tokenCache.set(apiKey, {
+      userInfo: userInfo,
+      expiresAt: Date.now() + CACHE_TTL
+    });
 
     // Log API usage (optional - for monitoring)
-    console.log(`API request from user ${req.apiUser.email} (${req.apiUser.id}) - ${req.method} ${req.path}`);
+    console.log(`API request from user ${req.apiUser.email} (${req.apiUser.id}) - ${req.method} ${req.path} [DB]`);
     
     next();
   } catch (error) {
