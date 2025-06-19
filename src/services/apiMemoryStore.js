@@ -228,6 +228,26 @@ export const getApiEmail = (emailId, userId) => {
 };
 
 /**
+ * Delete an API email
+ */
+export const deleteApiEmail = (emailId, userId) => {
+  const email = apiEmailStore.get(emailId);
+  
+  if (!email || email.userId !== userId) {
+    return false; // Email not found or doesn't belong to user
+  }
+  
+  // Remove from all maps and indexes
+  apiEmailStore.delete(emailId);
+  userApiEmailIndex.get(userId)?.delete(emailId);
+  emailToApiUserMap.delete(email.email);
+  
+  console.log(`API email ${email.email} deleted by user ${userId}`);
+  
+  return true; // Successfully deleted
+};
+
+/**
  * Add received message to API email
  */
 export const addApiEmailMessage = (emailId, messageData) => {

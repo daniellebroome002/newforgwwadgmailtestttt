@@ -11,7 +11,8 @@ import {
   getUserApiEmails, 
   getApiEmail, 
   getUserUsageStats,
-  getTomorrowMidnight
+  getTomorrowMidnight,
+  deleteApiEmail
 } from '../services/apiMemoryStore.js';
 
 const router = express.Router();
@@ -318,6 +319,52 @@ router.get('/emails/:id/messages', async (req, res) => {
     res.status(500).json({ 
       error: 'Failed to fetch messages',
       message: 'An internal error occurred while fetching messages'
+    });
+  }
+});
+
+/**
+ * DELETE /api/v1/emails/:id
+ * Delete a specific API email
+ */
+router.delete('/emails/:id', async (req, res) => {
+  try {
+    const emailId = req.params.id;
+    const userId = req.apiUser.id;
+
+    // Validate email ID format
+    if (!emailId || typeof emailId !== 'string') {
+      return res.status(400).json({ 
+        error: 'Invalid email ID',
+        message: 'Email ID must be a valid string'
+      });
+    }
+
+    // Attempt to delete the email
+    const deleted = deleteApiEmail(emailId, userId);
+    
+    if (!deleted) {
+      return res.status(404).json({ 
+        error: 'Email not found',
+        message: 'The requested email was not found or has already expired'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Email deleted successfully',
+      meta: {
+        user_id: userId,
+        email_id: emailId,
+        deleted_at: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('API email deletion failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to delete email',
+      message: 'An internal error occurred while deleting the email'
     });
   }
 });
