@@ -21,6 +21,15 @@ const FREE_LIMITS = {
 // Cache expiration time (same as guest system)
 const CACHE_EXPIRY = 10 * 60 * 1000; // 10 minutes
 
+// Smart caching for domains and user domains
+const domainsCache = {
+  domains: [],
+  lastUpdate: 0,
+  TTL: 30 * 60 * 1000 // 30 minutes
+};
+
+const userDomainsCache = new Map(); // { userId: { domains: [], expiresAt } }
+
 /**
  * Generate random string for email local part
  */
@@ -34,12 +43,25 @@ const generateRandomString = (length = 8) => {
 };
 
 /**
- * Get random domain from available domains
+ * Get random domain from available domains (with caching)
  */
 const getRandomDomain = async () => {
   try {
-    const [domains] = await pool.query('SELECT domain FROM domains ORDER BY RAND() LIMIT 1');
-    return domains.length > 0 ? domains[0].domain : 'boomlify.com';
+    // Check cache first
+    if (Date.now() - domainsCache.lastUpdate > domainsCache.TTL || domainsCache.domains.length === 0) {
+      // Cache miss or expired - refresh from database
+      const [domains] = await pool.query('SELECT domain FROM domains');
+      domainsCache.domains = domains.map(d => d.domain);
+      domainsCache.lastUpdate = Date.now();
+      console.log(`Refreshed domains cache: ${domainsCache.domains.length} domains loaded`);
+    }
+    
+    // Return random domain from cache
+    if (domainsCache.domains.length > 0) {
+      return domainsCache.domains[Math.floor(Math.random() * domainsCache.domains.length)];
+    }
+    
+    return 'boomlify.com';
   } catch (error) {
     console.error('Failed to get random domain:', error);
     return 'boomlify.com';
@@ -84,16 +106,31 @@ const updateUsageCounter = (userId, timeTier) => {
 };
 
 /**
- * Validate user's custom domain
+ * Validate user's custom domain (with caching)
  */
 const validateUserDomain = async (userId, domain) => {
   try {
+    // Check cache first
+    const cached = userDomainsCache.get(userId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.domains.includes(domain) ? domain : null;
+    }
+    
+    // Cache miss or expired - refresh from database
     const [customDomains] = await pool.query(
-      'SELECT domain FROM custom_domains WHERE user_id = ? AND status = ? AND domain = ?',
-      [userId, 'verified', domain]
+      'SELECT domain FROM custom_domains WHERE user_id = ? AND status = ?',
+      [userId, 'verified']
     );
     
-    return customDomains.length > 0 ? domain : null;
+    const domains = customDomains.map(d => d.domain);
+    userDomainsCache.set(userId, {
+      domains,
+      expiresAt: Date.now() + 5 * 60 * 1000 // 5 minutes cache
+    });
+    
+    console.log(`Refreshed user domains cache for ${userId}: ${domains.length} domains`);
+    
+    return domains.includes(domain) ? domain : null;
   } catch (error) {
     console.error('Failed to validate custom domain:', error);
     return null;
@@ -313,7 +350,21 @@ export const findApiUserByEmail = (emailAddress) => {
 const syncUsageToDatabase = async () => {
   try {
     for (const [key, usage] of usageCounters.entries()) {
-      const [userId, date] = key.split('-');
+      // Fix: Split on last dash to handle UUIDs with multiple dashes
+      const lastDashIndex = key.lastIndexOf('-');
+      if (lastDashIndex === -1) {
+        console.error('Invalid usage counter key format:', key);
+        continue;
+      }
+      
+      const userId = key.substring(0, lastDashIndex);
+      const date = key.substring(lastDashIndex + 1);
+      
+      // Validate date format (YYYY-MM-DD)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        console.error('Invalid date format in key:', key, 'extracted date:', date);
+        continue;
+      }
       
       await pool.query(`
         INSERT INTO api_usage_daily (user_id, date, tier_10min, tier_1hour, tier_1day, updated_at) 
@@ -356,15 +407,28 @@ const cleanupExpiredData = () => {
   const cutoffDate = sevenDaysAgo.toISOString().split('T')[0];
   
   for (const [key] of usageCounters.entries()) {
-    const [, date] = key.split('-');
+    // Fix: Split on last dash to handle UUIDs with multiple dashes
+    const lastDashIndex = key.lastIndexOf('-');
+    if (lastDashIndex === -1) continue;
+    
+    const date = key.substring(lastDashIndex + 1);
     if (date < cutoffDate) {
       usageCounters.delete(key);
       cleanedCounters++;
     }
   }
   
-  if (cleanedEmails > 0 || cleanedCounters > 0) {
-    console.log(`Cleanup: Removed ${cleanedEmails} expired emails and ${cleanedCounters} old usage counters`);
+  // Clean expired user domains cache
+  let cleanedDomainCache = 0;
+  for (const [userId, data] of userDomainsCache.entries()) {
+    if (data.expiresAt <= now.getTime()) {
+      userDomainsCache.delete(userId);
+      cleanedDomainCache++;
+    }
+  }
+
+  if (cleanedEmails > 0 || cleanedCounters > 0 || cleanedDomainCache > 0) {
+    console.log(`Cleanup: Removed ${cleanedEmails} expired emails, ${cleanedCounters} old usage counters, and ${cleanedDomainCache} expired domain caches`);
   }
 };
 
@@ -393,4 +457,21 @@ export const initializeApiMemoryStore = () => {
   };
 };
 
-console.log('API Memory Store loaded'); 
+/**
+ * Invalidate user's domains cache when they add/remove domains
+ */
+export const invalidateUserDomainsCache = (userId) => {
+  userDomainsCache.delete(userId);
+  console.log(`Invalidated domains cache for user ${userId}`);
+};
+
+/**
+ * Invalidate all domains cache when domains are added/removed
+ */
+export const invalidateDomainsCache = () => {
+  domainsCache.lastUpdate = 0;
+  domainsCache.domains = [];
+  console.log('Invalidated global domains cache');
+};
+
+console.log('API Memory Store loaded with smart caching'); 
