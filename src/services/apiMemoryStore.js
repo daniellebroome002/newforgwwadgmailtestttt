@@ -89,8 +89,8 @@ const updateUsageCounter = (userId, timeTier) => {
 const validateUserDomain = async (userId, domain) => {
   try {
     const [customDomains] = await pool.query(
-      'SELECT domain FROM custom_domains WHERE user_id = ? AND status = "verified" AND domain = ?',
-      [userId, domain]
+      'SELECT domain FROM custom_domains WHERE user_id = ? AND status = ? AND domain = ?',
+      [userId, 'verified', domain]
     );
     
     return customDomains.length > 0 ? domain : null;
