@@ -6,12 +6,13 @@ import { pool } from '../db/init.js';
  * Checks against existing premium_settings table
  */
 export const authenticateApiKey = async (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
+  // Check both header and query parameter for API key (CORS compatibility)
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
   
   if (!apiKey) {
     return res.status(401).json({ 
       error: 'API key required',
-      message: 'Please provide your API key in the X-API-Key header'
+      message: 'Please provide your API key in the X-API-Key header or api_key query parameter'
     });
   }
 

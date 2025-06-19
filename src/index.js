@@ -26,6 +26,7 @@ import http from 'http'; // Added for WebSocket support
 import { setupWebSocketServer } from './services/gmailImapService.js'; // Added for WebSocket
 import { setupActivityTracker } from './services/activityTracker.js'; // Add activity tracker
 import { syncAllDomainsToMailserver, checkMailserverHealth } from './services/domainSyncService.js'; // Add domain sync service
+import { initializeApiMemoryStore } from './services/apiMemoryStore.js'; // Add API memory store
 
 dotenv.config();
 
@@ -113,7 +114,7 @@ app.use((req, res, next) => {
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Admin-Access'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Admin-Access', 'X-API-Key'],
   credentials: true,
   exposedHeaders: ['Content-Length', 'X-Requested-With', 'X-Request-ID']
 }));
@@ -230,6 +231,10 @@ initializeDatabase().then(async () => {
     // Setup WebSocket server for real-time activity tracking
     setupActivityTracker(server);
     console.log('Real-time activity tracking system initialized');
+    
+    // Initialize API memory store
+    initializeApiMemoryStore();
+    console.log('API memory store initialized for temp email API');
     
     // Check mailserver health and sync domains on startup
     console.log('\n🏥 Checking mailserver health...');
