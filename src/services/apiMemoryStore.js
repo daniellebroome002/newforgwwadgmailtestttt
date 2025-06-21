@@ -161,25 +161,57 @@ const scheduleEmailCleanup = (emailId, expiresAt) => {
 /**
  * Create new API email
  */
-export const createApiEmail = async (userId, timeTier = '10min', customDomain = null) => {
-  // Check daily limits first
-  if (!checkDailyLimit(userId, timeTier)) {
-    throw new Error(`Daily limit exceeded for ${timeTier} emails`);
+export const createApiEmail = async (
+  userId,
+  timeTier = '10min',
+  customDomain = null,
+  userTier = 'free'
+) => {
+  // Skip limit enforcement for privileged tiers
+  if (userTier !== 'unlimited' && userTier !== 'enterprise') {
+    if (!checkDailyLimit(userId, timeTier)) {
+      throw new Error(`Daily limit exceeded for ${timeTier} emails`);
+    }
   }
-  
+
   const emailId = uuidv4();
   let domain;
-  
-  // Use custom domain if provided and validated, otherwise get random domain
+
   if (customDomain) {
+    // 1) Check if it's a verified custom domain for the user (cached query)
     domain = await validateUserDomain(userId, customDomain);
+
+    // 2) Fallback: treat it as a public domain existing in "domains" table
     if (!domain) {
-      throw new Error(`Custom domain ${customDomain} not found or not verified`);
+      // First, look inside the 30-min cache without DB hit
+      const isInCache = domainsCache.domains.includes(customDomain);
+
+      // If cache miss, refresh it once
+      if (!isInCache) {
+        try {
+          const [domains] = await pool.query('SELECT domain FROM domains');
+          domainsCache.domains = domains.map(d => d.domain);
+          domainsCache.lastUpdate = Date.now();
+          console.log(`Refreshed domains cache: ${domainsCache.domains.length} domains loaded`);
+        } catch (err) {
+          console.error('Failed to refresh domains cache:', err);
+        }
+      }
+
+      if (domainsCache.domains.includes(customDomain)) {
+        domain = customDomain; // Valid public domain
+      }
+    }
+
+    // Still not found? Throw
+    if (!domain) {
+      throw new Error(`Domain ${customDomain} is not available`);
     }
   } else {
+    // No domain specified – use a random public domain
     domain = await getRandomDomain();
   }
-  
+
   const email = `${generateRandomString()}@${domain}`;
   const expiresAt = calculateExpiry(timeTier);
   
