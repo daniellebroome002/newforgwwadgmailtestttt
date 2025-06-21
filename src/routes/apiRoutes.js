@@ -54,7 +54,7 @@ router.post('/emails/create', async (req, res) => {
     }
 
     // Create the API email
-    const email = await createApiEmail(userId, time, domain?.trim());
+    const email = await createApiEmail(userId, time, domain?.trim(), req.apiUser.tier);
     
     // Calculate time remaining for response
     const now = new Date();
