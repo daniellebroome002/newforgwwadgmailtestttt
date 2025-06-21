@@ -117,16 +117,23 @@ export const apiRateLimit = (requestsPerMinute = 60) => {
   
   return (req, res, next) => {
     const userId = req.apiUser?.id;
+    const userTier = req.apiUser?.tier || 'free';
+
+    // Unlimited or enterprise tiers bypass per-minute rate limiting
+    if (userTier === 'unlimited' || userTier === 'enterprise') {
+      return next();
+    }
+
     if (!userId) {
-      return next(); // Skip if no user (should not happen after auth)
+      return next(); // Should not happen after auth
     }
 
     const now = Date.now();
     const windowStart = Math.floor(now / 60000) * 60000; // 1-minute window
     const key = `${userId}-${windowStart}`;
-    
+
     const currentCount = requestCounts.get(key) || 0;
-    
+
     if (currentCount >= requestsPerMinute) {
       return res.status(429).json({
         error: 'Rate limit exceeded',
@@ -134,7 +141,7 @@ export const apiRateLimit = (requestsPerMinute = 60) => {
         retryAfter: 60 - Math.floor((now - windowStart) / 1000)
       });
     }
-    
+
     requestCounts.set(key, currentCount + 1);
     
     // Clean up old entries every 5 minutes
