@@ -37,11 +37,12 @@ const customDomainUsageCache = {
       };
       this.users.set(userId, newData);
       
-      // Mark for database reset
+      // Mark for database reset - PRESERVE existing total deltas
+      const existing = this.pendingOperations.get(userId) || { totalDelta: 0 };
       this.pendingOperations.set(userId, {
         dailyDelta: -data?.dailyCount || 0, // Reset daily to 0
-        totalDelta: 0,
-        domainId: null,
+        totalDelta: existing.totalDelta, // PRESERVE pending total increments
+        domainId: existing.domainId || null,
         resetDaily: true
       });
       
